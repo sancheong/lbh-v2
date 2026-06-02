@@ -1,0 +1,7 @@
+{
+  "type": "click",
+  "point": {"x": 640, "y": 520, "space": "resized_image"},
+  "button": "left",
+  "clicks": 1,
+  "reason": "click target identified on resized screenshot"
+}
