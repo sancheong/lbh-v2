@@ -1,0 +1,33 @@
+{
+  "observe_after": true,
+  "stop_on_error": true,
+  "max_duration_seconds": 12,
+  "reason": "Chrome is foregrounded and address bar navigation is deterministic.",
+  "actions": [
+    {
+      "type": "hotkey",
+      "keys": ["ctrl", "l"],
+      "reason": "Focus address bar."
+    },
+    {
+      "type": "clipboard_set",
+      "text": "https://chatgpt.com",
+      "reason": "Prepare target URL."
+    },
+    {
+      "type": "hotkey",
+      "keys": ["ctrl", "v"],
+      "reason": "Paste URL."
+    },
+    {
+      "type": "press",
+      "key": "enter",
+      "reason": "Navigate."
+    },
+    {
+      "type": "wait",
+      "seconds": 3,
+      "reason": "Allow navigation."
+    }
+  ]
+}
