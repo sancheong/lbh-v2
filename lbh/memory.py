@@ -97,6 +97,12 @@ class MemoryStore:
                 return record
         return None
 
+    def get_task_record_view(self, record_id: str) -> dict[str, Any] | None:
+        record = self.get_task_record(record_id)
+        if record is None:
+            return None
+        return self._build_task_record_view(record)
+
     def commit_task_record(
         self,
         *,
@@ -287,7 +293,8 @@ class MemoryStore:
 
     def _build_task_card(self, record: TaskMemoryRecord) -> dict[str, Any]:
         latest_success_version = self._find_version_by_id(record, record.latest_success_version_id)
-        version_for_failures = latest_success_version or self._preferred_baseline_version(record)
+        baseline_version = self._preferred_baseline_version(record)
+        version_for_failures = latest_success_version or baseline_version
         recent_failures: list[dict[str, Any]] = []
         if version_for_failures:
             failures = [run for run in version_for_failures.run_records if run.status != "success"]
@@ -315,8 +322,31 @@ class MemoryStore:
                 if latest_success_version
                 else None
             ),
+            "baseline_version": (
+                {
+                    "version_id": baseline_version.version_id,
+                    "change_summary": baseline_version.change_summary,
+                    "change_reason": baseline_version.change_reason,
+                    "sequence": [step.to_dict() for step in baseline_version.sequence],
+                }
+                if baseline_version
+                else None
+            ),
             "recent_failures": recent_failures,
             "root_version_id": record.root_version_id,
             "latest_version_id": record.latest_version_id,
             "latest_success_version_id": record.latest_success_version_id,
+        }
+
+    def _build_task_record_view(self, record: TaskMemoryRecord) -> dict[str, Any]:
+        return {
+            "record_id": record.record_id,
+            "user_query": record.user_query,
+            "task_description": record.task_description,
+            "root_version_id": record.root_version_id,
+            "latest_version_id": record.latest_version_id,
+            "latest_success_version_id": record.latest_success_version_id,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+            "versions": [version.to_dict() for version in record.versions],
         }

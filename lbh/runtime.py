@@ -51,7 +51,11 @@ class LBHRuntime:
             jpeg_quality=jpeg_quality,
             force=force,
         )
-        state.memory_context = self._automatic_memory_context(goal=goal, observation=None)
+        state.memory_context = self._automatic_memory_context(
+            goal=goal,
+            observation=None,
+            selected_record_id=state.selected_memory_record_id,
+        )
         self.task_store.save_state(state)
         self.task_store.append_event(
             state.task_dir,
@@ -429,11 +433,60 @@ class LBHRuntime:
 
     def memory_search(self, task: str | Path, *, query: str | None = None, limit: int = 5) -> dict[str, Any]:
         state = self.task_store.load_state(task)
-        memory = self.memory_store.search(goal=state.goal, observation=state.latest_observation, query=query, limit=limit)
+        memory = self._decorate_memory_context(
+            self.memory_store.search(goal=state.goal, observation=state.latest_observation, query=query, limit=limit),
+            selected_record_id=state.selected_memory_record_id,
+        )
         state.memory_context = memory
         self.task_store.save_state(state)
         self.task_store.append_event(state.task_dir, "memory_search", "Searched actionable memory.", status="success", query=query, results=memory)
         return {"status": "success", "memory": memory}
+
+    def memory_record(self, task: str | Path, *, record_id: str | None = None) -> dict[str, Any]:
+        state = self.task_store.load_state(task)
+        resolved_record_id = record_id or state.selected_memory_record_id
+        if not resolved_record_id:
+            raise TaskStateError("memory-record requires 'record_id' or a previously selected memory record.")
+        record = self.memory_store.get_task_record_view(resolved_record_id)
+        if record is None:
+            raise TaskStateError(f"Memory record not found: {resolved_record_id}")
+        self.task_store.append_event(
+            state.task_dir,
+            "memory_record",
+            "Loaded full passive task-record memory.",
+            status="success",
+            record_id=resolved_record_id,
+        )
+        return {
+            "status": "success",
+            "record": record,
+            "selected_record_id": state.selected_memory_record_id,
+        }
+
+    def memory_select(self, task: str | Path, *, record_id: str) -> dict[str, Any]:
+        state = self.task_store.load_state(task)
+        record = self.memory_store.get_task_record(record_id)
+        if record is None:
+            raise TaskStateError(f"Memory record not found: {record_id}")
+        state.selected_memory_record_id = record_id
+        state.memory_context = self._decorate_memory_context(
+            self.memory_store.search(goal=state.goal, observation=state.latest_observation, limit=5),
+            selected_record_id=record_id,
+        )
+        self.task_store.save_state(state)
+        self.task_store.append_event(
+            state.task_dir,
+            "memory_select",
+            "Selected passive task-record memory as the current draft baseline.",
+            status="success",
+            record_id=record_id,
+        )
+        return {
+            "status": "success",
+            "record_id": record_id,
+            "task_description": record.task_description,
+            "memory": state.memory_context,
+        }
 
     def memory_commit(self, task: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
         state = self.task_store.load_state(task)
@@ -456,8 +509,9 @@ class LBHRuntime:
             elapsed_time=float(payload.get("elapsed_time") or self._events_wall_clock_ms(events)),
             change_summary=str(payload.get("change_summary") or ""),
             change_reason=str(payload.get("change_reason") or ""),
-            record_id=payload.get("record_id"),
+            record_id=payload.get("record_id") or state.selected_memory_record_id,
         )
+        state.selected_memory_record_id = commit_result["record"]["record_id"]
         self.task_store.append_memory_update(
             task,
             {
@@ -476,7 +530,10 @@ class LBHRuntime:
             status="success",
             memory_commit=commit_result,
         )
-        state.memory_context = self.memory_store.search(goal=state.goal, observation=state.latest_observation, limit=5)
+        state.memory_context = self._decorate_memory_context(
+            self.memory_store.search(goal=state.goal, observation=state.latest_observation, limit=5),
+            selected_record_id=state.selected_memory_record_id,
+        )
         self.task_store.save_state(state)
         return {"status": "success", "memory_commit": commit_result}
 
@@ -513,7 +570,11 @@ class LBHRuntime:
         state.latest_observation = final_observation
         state.latest_evaluation = evaluation
         state.no_progress_streak = evaluation["no_progress_streak"]
-        state.memory_context = self._automatic_memory_context(goal=state.goal, observation=final_observation)
+        state.memory_context = self._automatic_memory_context(
+            goal=state.goal,
+            observation=final_observation,
+            selected_record_id=state.selected_memory_record_id,
+        )
         duration_ms = round((time.perf_counter() - started) * 1000, 3)
         state.latency_metrics["last_wait_stable_ms"] = duration_ms
         self.task_store.save_state(state)
@@ -843,15 +904,36 @@ class LBHRuntime:
                 seen_failure = False
         return recoveries
 
+    def _decorate_memory_context(
+        self,
+        memory: dict[str, Any],
+        *,
+        selected_record_id: str | None,
+    ) -> dict[str, Any]:
+        task_cards = []
+        for card in memory.get("task_cards", []):
+            decorated = dict(card)
+            decorated["selected"] = bool(selected_record_id and card.get("record_id") == selected_record_id)
+            task_cards.append(decorated)
+        return {
+            **memory,
+            "selected_record_id": selected_record_id,
+            "task_cards": task_cards,
+        }
+
     def _automatic_memory_context(
         self,
         *,
         goal: str,
         observation: dict[str, Any] | None,
+        selected_record_id: str | None = None,
     ) -> dict[str, Any]:
         if not self.memory_reference_enabled:
             return {}
-        return self.memory_store.search(goal=goal, observation=observation)
+        return self._decorate_memory_context(
+            self.memory_store.search(goal=goal, observation=observation),
+            selected_record_id=selected_record_id,
+        )
 
     def _automatic_guard_matches(
         self,
@@ -968,7 +1050,11 @@ class LBHRuntime:
         state.latest_observation = observation.to_dict()
         state.latest_evaluation = evaluation
         state.no_progress_streak = evaluation["no_progress_streak"]
-        state.memory_context = self._automatic_memory_context(goal=state.goal, observation=state.latest_observation)
+        state.memory_context = self._automatic_memory_context(
+            goal=state.goal,
+            observation=state.latest_observation,
+            selected_record_id=state.selected_memory_record_id,
+        )
         duration_ms = round((time.perf_counter() - started) * 1000, 3)
         state.latency_metrics["last_observe_ms"] = duration_ms
         self.task_store.save_state(state)

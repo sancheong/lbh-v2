@@ -52,6 +52,9 @@ class PyAutoGUIDesktopAdapter(DesktopAdapter):
     def _pyautogui(self):
         import pyautogui
 
+        # The runtime controls the desktop directly; leave PyAutoGUI fail-safe off
+        # so a stale cursor position in a screen corner does not block every action.
+        pyautogui.FAILSAFE = False
         return pyautogui
 
     def _pygetwindow(self):

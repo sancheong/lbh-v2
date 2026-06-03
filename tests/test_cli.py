@@ -28,3 +28,15 @@ def test_cli_parser_accepts_memory_commit():
     args = parser.parse_args(["memory-commit", "--task", "task-1", "--memory-json", "{\"run_status\":\"success\"}"])
     assert args.task == "task-1"
     assert args.memory_json == "{\"run_status\":\"success\"}"
+
+
+def test_cli_parser_accepts_memory_record_and_select():
+    parser = build_parser()
+
+    record_args = parser.parse_args(["memory-record", "--task", "task-1", "--record-id", "taskmem-123"])
+    select_args = parser.parse_args(["memory-select", "--task", "task-1", "--record-id", "taskmem-123"])
+
+    assert record_args.task == "task-1"
+    assert record_args.record_id == "taskmem-123"
+    assert select_args.task == "task-1"
+    assert select_args.record_id == "taskmem-123"

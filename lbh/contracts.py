@@ -644,6 +644,7 @@ class TaskState:
     latest_evaluation: dict[str, Any] | None = None
     suspension: dict[str, Any] | None = None
     result_answer: str | None = None
+    selected_memory_record_id: str | None = None
     memory_context: dict[str, Any] = field(default_factory=dict)
     latency_metrics: dict[str, Any] = field(default_factory=dict)
 
@@ -666,6 +667,7 @@ class TaskState:
             latest_evaluation=payload.get("latest_evaluation"),
             suspension=payload.get("suspension"),
             result_answer=payload.get("result_answer"),
+            selected_memory_record_id=payload.get("selected_memory_record_id"),
             memory_context=dict(payload.get("memory_context") or {}),
             latency_metrics=dict(payload.get("latency_metrics") or {}),
         )
@@ -688,6 +690,7 @@ class TaskState:
             "latest_evaluation": self.latest_evaluation,
             "suspension": self.suspension,
             "result_answer": self.result_answer,
+            "selected_memory_record_id": self.selected_memory_record_id,
             "memory_context": self.memory_context,
             "latency_metrics": self.latency_metrics,
         }

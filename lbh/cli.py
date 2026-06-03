@@ -95,6 +95,14 @@ def cmd_memory_search(runtime: LBHRuntime, args) -> dict[str, Any]:
     return runtime.memory_search(args.task, query=args.query, limit=args.limit)
 
 
+def cmd_memory_record(runtime: LBHRuntime, args) -> dict[str, Any]:
+    return runtime.memory_record(args.task, record_id=args.record_id)
+
+
+def cmd_memory_select(runtime: LBHRuntime, args) -> dict[str, Any]:
+    return runtime.memory_select(args.task, record_id=args.record_id)
+
+
 def cmd_memory_commit(runtime: LBHRuntime, args) -> dict[str, Any]:
     payload = coerce_json_input(args.json or args.memory_json or args.memory_file)
     return runtime.memory_commit(args.task, payload)
@@ -231,6 +239,18 @@ def build_parser() -> argparse.ArgumentParser:
     memory_search.add_argument("--query")
     memory_search.add_argument("--limit", type=int, default=5)
     memory_search.set_defaults(func=cmd_memory_search)
+
+    memory_record = sub.add_parser("memory-record")
+    add_common(memory_record)
+    memory_record.add_argument("--task", required=True)
+    memory_record.add_argument("--record-id")
+    memory_record.set_defaults(func=cmd_memory_record)
+
+    memory_select = sub.add_parser("memory-select")
+    add_common(memory_select)
+    memory_select.add_argument("--task", required=True)
+    memory_select.add_argument("--record-id", required=True)
+    memory_select.set_defaults(func=cmd_memory_select)
 
     memory_commit = sub.add_parser("memory-commit")
     add_common(memory_commit)

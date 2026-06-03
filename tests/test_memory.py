@@ -152,6 +152,49 @@ def test_task_card_includes_latest_success_version_and_recent_failures(tmp_path)
 
     card = result["task_cards"][0]
     assert card["latest_success_version"] is not None
+    assert card["baseline_version"] is not None
     assert card["latest_success_version"]["sequence"][0]["action_name"] == "open_chrome"
+    assert card["baseline_version"]["sequence"][0]["action_name"] == "open_chrome"
     assert len(card["recent_failures"]) == 3
     assert card["recent_failures"][0]["note"] == "Failure 3"
+
+
+def test_get_task_record_view_returns_full_version_history(tmp_path):
+    store = MemoryStore(memory_dir=tmp_path / "memories")
+    created = store.commit_task_record(
+        user_query="Open Chrome and go to ChatGPT.",
+        task_description="Open Chrome, navigate to ChatGPT, and ask a question.",
+        sequence=[{"action_name": "open_chrome", "status": "success", "duration": 1}],
+        run_status="success",
+        run_note="Initial run.",
+        elapsed_time=100.0,
+        change_summary="Initial sequence.",
+        change_reason="First run.",
+    )
+
+    record = store.get_task_record_view(created["record"]["record_id"])
+
+    assert record is not None
+    assert record["versions"][0]["change_summary"] == "Initial sequence."
+    assert record["versions"][0]["run_records"][0]["note"] == "Initial run."
+
+
+def test_task_card_exposes_baseline_version_when_no_success_exists(tmp_path):
+    store = MemoryStore(memory_dir=tmp_path / "memories")
+    store.commit_task_record(
+        user_query="Open Chrome and go to ChatGPT.",
+        task_description="Open Chrome, navigate to ChatGPT, and ask a question.",
+        sequence=[{"action_name": "open_chrome", "status": "success", "duration": 1}],
+        run_status="failure",
+        run_note="Initial attempt failed.",
+        elapsed_time=100.0,
+        change_summary="Initial failed sequence.",
+        change_reason="First run still needs to be preserved.",
+    )
+
+    result = store.search(goal="Open Chrome")
+
+    card = result["task_cards"][0]
+    assert card["latest_success_version"] is None
+    assert card["baseline_version"] is not None
+    assert card["baseline_version"]["sequence"][0]["action_name"] == "open_chrome"
