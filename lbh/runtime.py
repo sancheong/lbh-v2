@@ -507,7 +507,19 @@ class LBHRuntime:
             raise TaskStateError("memory-commit 'run_status' must be 'success' or 'failure'.")
         if "run_note" not in payload:
             raise TaskStateError("memory-commit requires 'run_note'.")
-        sequence = payload.get("sequence") or self.memory_store.derive_sequence_from_events(events)
+        target_record_id = payload.get("record_id") or state.selected_memory_record_id
+        existing_record = self.memory_store.get_task_record(target_record_id) if target_record_id else None
+        derived_sequence = self.memory_store.derive_sequence_from_events(events)
+        provided_sequence = payload.get("sequence")
+        quality_notes: list[str] = []
+        if existing_record is None:
+            sequence = derived_sequence or provided_sequence or []
+            if provided_sequence and derived_sequence:
+                quality_notes.append(
+                    "The root version was saved from the raw event-derived sequence instead of the provided refined sequence."
+                )
+        else:
+            sequence = provided_sequence or derived_sequence
         commit_result = self.memory_store.commit_task_record(
             user_query=str(payload.get("user_query") or state.goal),
             task_description=str(payload.get("task_description") or state.goal),
@@ -517,7 +529,7 @@ class LBHRuntime:
             elapsed_time=float(payload.get("elapsed_time") or self._events_wall_clock_ms(events)),
             change_summary=str(payload.get("change_summary") or ""),
             change_reason=str(payload.get("change_reason") or ""),
-            record_id=payload.get("record_id") or state.selected_memory_record_id,
+            record_id=target_record_id,
         )
         post_commit_events = [*events, {"type": "memory_commit"}]
         sequence_improvement_signals = self._sequence_improvement_signals(events)
@@ -542,6 +554,7 @@ class LBHRuntime:
             memory_commit=commit_result,
             sequence_improvement_signals=sequence_improvement_signals,
             lifecycle_warnings=lifecycle_warnings,
+            quality_notes=quality_notes,
         )
         state.memory_context = self._decorate_memory_context(
             self.memory_store.search(goal=state.goal, observation=state.latest_observation, limit=5),
@@ -553,6 +566,7 @@ class LBHRuntime:
             "memory_commit": commit_result,
             "sequence_improvement_signals": sequence_improvement_signals,
             "lifecycle_warnings": lifecycle_warnings,
+            "quality_notes": quality_notes,
         }
 
     def wait_stable(

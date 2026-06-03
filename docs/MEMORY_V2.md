@@ -52,6 +52,8 @@ Each run record contains:
 
 ## Sequence evolution
 
+- The root version should stay as close as practical to the raw executed trace.
+- Later versions may use a refined sequence when Codex is intentionally evolving the draft.
 - If the final sequence is unchanged, append only a new run record.
 - If the final sequence changed through merge, delete, or add, append a new version.
 - The direct parent for a new version is the latest successful version.

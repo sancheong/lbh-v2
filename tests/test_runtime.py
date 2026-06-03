@@ -233,6 +233,80 @@ def test_runtime_memory_commit_derives_raw_sequence(tmp_path):
     assert record["versions"][0]["sequence"][0]["action_name"] == "hotkey:ctrl+l"
 
 
+def test_runtime_memory_commit_prefers_raw_sequence_for_root_version(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.create_task("Open ChatGPT.", task_id="task-1")
+    runtime.observe("task-1")
+    runtime.execute_batch(
+        "task-1",
+        {
+            "observe_after": False,
+            "actions": [
+                {"type": "hotkey", "keys": ["ctrl", "l"], "reason": "Focus address bar"},
+                {"type": "clipboard_set", "text": "https://chatgpt.com", "reason": "Prepare URL"},
+                {"type": "hotkey", "keys": ["ctrl", "v"], "reason": "Paste URL"},
+            ],
+        },
+    )
+
+    result = runtime.memory_commit(
+        "task-1",
+        {
+            "task_description": "Open Chrome and navigate to ChatGPT.",
+            "sequence": [
+                {"action_name": "navigate_chatgpt", "status": "success", "duration": 1},
+            ],
+            "change_summary": "Refined root attempt.",
+            "change_reason": "Would prefer a compact abstraction.",
+            "run_note": "Capture the first run.",
+            "run_status": "success",
+        },
+    )
+
+    sequence = result["memory_commit"]["record"]["versions"][0]["sequence"]
+    assert sequence[0]["action_name"] == "hotkey:ctrl+l"
+    assert result["quality_notes"]
+
+
+def test_runtime_memory_commit_keeps_refined_sequence_for_later_versions(tmp_path):
+    runtime = _runtime(tmp_path)
+    committed = runtime.memory_store.commit_task_record(
+        user_query="Open Chrome and go to ChatGPT.",
+        task_description="Open Chrome and navigate to ChatGPT.",
+        sequence=[
+            {"action_name": "hotkey:ctrl+l", "status": "success", "duration": 1},
+            {"action_name": "clipboard_set:url", "status": "success", "duration": 1},
+        ],
+        run_status="success",
+        run_note="Initial raw run.",
+        elapsed_time=100.0,
+        change_summary="Initial root sequence.",
+        change_reason="Preserve raw root.",
+    )
+    record_id = committed["record"]["record_id"]
+    runtime.create_task("Open Chrome and go to ChatGPT.", task_id="task-1")
+    runtime.memory_select("task-1", record_id=record_id)
+
+    result = runtime.memory_commit(
+        "task-1",
+        {
+            "task_description": "Open Chrome and navigate to ChatGPT.",
+            "sequence": [
+                {"action_name": "navigate_chatgpt", "status": "success", "duration": 1},
+            ],
+            "change_summary": "Merged URL navigation.",
+            "change_reason": "Use a compact stable draft for later reuse.",
+            "run_note": "Create refined follow-up version.",
+            "run_status": "success",
+            "elapsed_time": 90.0,
+        },
+    )
+
+    latest_version = result["memory_commit"]["record"]["versions"][-1]
+    assert latest_version["sequence"][0]["action_name"] == "navigate_chatgpt"
+    assert result["quality_notes"] == []
+
+
 def test_runtime_memory_search_returns_task_records(tmp_path):
     runtime = _runtime(tmp_path)
     runtime.memory_store.commit_task_record(
