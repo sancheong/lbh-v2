@@ -181,12 +181,12 @@ def test_search_returns_matching_task_records(tmp_path):
 
     result = store.search(goal="Open app")
 
-    assert result["task_cards"]
-    assert result["task_cards"][0]["record_id"] == second["record"]["record_id"]
-    assert result["task_cards"][1]["record_id"] == first["record"]["record_id"]
+    assert result["task_records"]
+    assert result["task_records"][0]["record_id"] == second["record"]["record_id"]
+    assert result["task_records"][1]["record_id"] == first["record"]["record_id"]
 
 
-def test_task_card_includes_latest_success_version_and_recent_failures(tmp_path):
+def test_task_record_summary_includes_success_versions_and_recent_failures(tmp_path):
     store = MemoryStore(memory_dir=tmp_path / "memories")
     created = store.commit_task_record(
         user_query="Open Chrome and go to ChatGPT.",
@@ -212,16 +212,15 @@ def test_task_card_includes_latest_success_version_and_recent_failures(tmp_path)
 
     result = store.search(goal="Open Chrome")
 
-    card = result["task_cards"][0]
-    assert card["latest_success_version"] is not None
-    assert card["baseline_version"] is not None
-    assert card["latest_success_version"]["sequence"][0]["action_name"] == "open_chrome"
-    assert card["baseline_version"]["sequence"][0]["action_name"] == "open_chrome"
-    assert len(card["recent_failures"]) == 3
-    assert card["recent_failures"][0]["note"] == "Failure 3"
+    summary = result["task_records"][0]
+    assert summary["success_versions"]
+    assert summary["latest_success_version_id"] is not None
+    assert summary["success_versions"][0]["sequence"][0]["action_name"] == "open_chrome"
+    assert len(summary["recent_failures"]) == 3
+    assert summary["recent_failures"][0]["note"] == "Failure 3"
 
 
-def test_task_card_prefers_higher_quality_success_version_over_latest(tmp_path):
+def test_task_record_summary_lists_multiple_success_versions_newest_first(tmp_path):
     store = MemoryStore(memory_dir=tmp_path / "memories")
     created = store.commit_task_record(
         user_query="Open Chrome and go to ChatGPT.",
@@ -272,12 +271,11 @@ def test_task_card_prefers_higher_quality_success_version_over_latest(tmp_path):
 
     result = store.search(goal="Open Chrome")
 
-    card = result["task_cards"][0]
-    assert card["latest_success_version"] is not None
-    assert card["preferred_success_version"] is not None
-    assert card["latest_success_version"]["change_summary"] == "Noisier success path."
-    assert card["preferred_success_version"]["change_summary"] == "Compact success path."
-    assert card["baseline_version"]["change_summary"] == "Compact success path."
+    summary = result["task_records"][0]
+    assert summary["latest_success_version_id"] is not None
+    assert len(summary["success_versions"]) == 2
+    assert summary["success_versions"][0]["change_summary"] == "Noisier success path."
+    assert summary["success_versions"][1]["change_summary"] == "Compact success path."
 
 
 def test_get_task_record_view_returns_full_version_history(tmp_path):
@@ -296,12 +294,11 @@ def test_get_task_record_view_returns_full_version_history(tmp_path):
     record = store.get_task_record_view(created["record"]["record_id"])
 
     assert record is not None
-    assert record["preferred_success_version_id"] == record["latest_success_version_id"]
     assert record["versions"][0]["change_summary"] == "Initial sequence."
     assert record["versions"][0]["run_records"][0]["note"] == "Initial run."
 
 
-def test_task_card_exposes_baseline_version_when_no_success_exists(tmp_path):
+def test_task_record_summary_has_no_success_versions_when_no_success_exists(tmp_path):
     store = MemoryStore(memory_dir=tmp_path / "memories")
     store.commit_task_record(
         user_query="Open Chrome and go to ChatGPT.",
@@ -316,10 +313,40 @@ def test_task_card_exposes_baseline_version_when_no_success_exists(tmp_path):
 
     result = store.search(goal="Open Chrome")
 
-    card = result["task_cards"][0]
-    assert card["latest_success_version"] is None
-    assert card["baseline_version"] is not None
-    assert card["baseline_version"]["sequence"][0]["action_name"] == "open_chrome"
+    summary = result["task_records"][0]
+    assert summary["latest_success_version_id"] is None
+    assert summary["success_versions"] == []
+
+
+def test_commit_uses_explicit_base_version_when_provided(tmp_path):
+    store = MemoryStore(memory_dir=tmp_path / "memories")
+    created = store.commit_task_record(
+        user_query="Open Chrome and go to ChatGPT.",
+        task_description="Open Chrome, navigate to ChatGPT, and ask a question.",
+        sequence=[{"action_name": "open_chrome", "status": "success", "duration": 1}],
+        run_status="success",
+        run_note="Initial run.",
+        elapsed_time=100.0,
+        change_summary="Initial sequence.",
+        change_reason="First run.",
+    )
+    record_id = created["record"]["record_id"]
+    root_version_id = created["version_id"]
+    updated = store.commit_task_record(
+        record_id=record_id,
+        base_version_id=root_version_id,
+        user_query="Open Chrome and go to ChatGPT.",
+        task_description="Open Chrome, navigate to ChatGPT, and ask a question.",
+        sequence=[{"action_name": "navigate_chatgpt", "status": "success", "duration": 2}],
+        run_status="success",
+        run_note="Refined run.",
+        elapsed_time=95.0,
+        change_summary="Refined sequence.",
+        change_reason="Use the chosen draft as the parent.",
+    )
+
+    assert updated["action"] == "append_version"
+    assert updated["record"]["versions"][-1]["parent_version_id"] == root_version_id
 
 
 def test_derive_sequence_from_events_uses_seconds(tmp_path):

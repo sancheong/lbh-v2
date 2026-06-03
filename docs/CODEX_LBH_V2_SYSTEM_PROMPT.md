@@ -19,7 +19,10 @@ You are controlling a visible local desktop GUI through **LBH V2**.
 - Use `wait-stable` after navigation or submission when the next semantic state depends on the page settling.
 - Use `suspend` for login, 2FA, CAPTCHA, UAC, permissions, payments, destructive actions, or unclear irreversible state.
 - At task start, use `memory-search`, then `memory-select` and `memory-record` when a matching task record exists.
-- Use `preferred_success_version` as the primary draft, keep `latest_success_version` as the most recent success reference, and fall back to `baseline_version` when no success exists yet.
+- Treat `memory-search` as a list of task record summaries, not as a recommended card.
+- Compare the current start state against the record's `success_versions` and choose the draft version yourself.
+- Use `latest_success_version_id` only as metadata about recency, not as an automatic draft choice.
+- When you commit a run evolved from a specific draft, pass that draft as `base_version_id`.
 - Treat `semantic_failure` as feedback that the current sequence is still hard to confirm.
 - Improve the next sequence using general GUI and browser common sense instead of adding narrow special-case rules.
 - When calling `memory-commit`, record timing fields in seconds, not milliseconds.

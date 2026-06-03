@@ -485,7 +485,7 @@ class LBHRuntime:
         self.task_store.append_event(
             state.task_dir,
             "memory_select",
-            "Selected passive task-record memory as the current draft baseline.",
+            "Selected passive task-record memory as the current working record.",
             status="success",
             record_id=record_id,
         )
@@ -508,6 +508,7 @@ class LBHRuntime:
         if "run_note" not in payload:
             raise TaskStateError("memory-commit requires 'run_note'.")
         target_record_id = payload.get("record_id") or state.selected_memory_record_id
+        base_version_id = payload.get("base_version_id")
         existing_record = self.memory_store.get_task_record(target_record_id) if target_record_id else None
         derived_sequence = self.memory_store.derive_sequence_from_events(events)
         provided_sequence = payload.get("sequence")
@@ -530,6 +531,7 @@ class LBHRuntime:
             change_summary=str(payload.get("change_summary") or ""),
             change_reason=str(payload.get("change_reason") or ""),
             record_id=target_record_id,
+            base_version_id=str(base_version_id) if base_version_id else None,
         )
         post_commit_events = [*events, {"type": "memory_commit"}]
         sequence_improvement_signals = self._sequence_improvement_signals(events)
@@ -976,15 +978,15 @@ class LBHRuntime:
         *,
         selected_record_id: str | None,
     ) -> dict[str, Any]:
-        task_cards = []
-        for card in memory.get("task_cards", []):
-            decorated = dict(card)
-            decorated["selected"] = bool(selected_record_id and card.get("record_id") == selected_record_id)
-            task_cards.append(decorated)
+        task_records = []
+        for record in memory.get("task_records", []):
+            decorated = dict(record)
+            decorated["selected"] = bool(selected_record_id and record.get("record_id") == selected_record_id)
+            task_records.append(decorated)
         return {
             **memory,
             "selected_record_id": selected_record_id,
-            "task_cards": task_cards,
+            "task_records": task_records,
         }
 
     def _automatic_memory_context(

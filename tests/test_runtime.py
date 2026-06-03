@@ -321,12 +321,12 @@ def test_runtime_memory_search_returns_task_records(tmp_path):
     runtime.create_task("Open Chrome and go to ChatGPT.", task_id="task-1")
     result = runtime.memory_search("task-1")
 
-    assert result["memory"]["task_cards"]
-    assert "ChatGPT" in result["memory"]["task_cards"][0]["task_description"]
-    assert result["memory"]["task_cards"][0]["baseline_version"] is not None
+    assert result["memory"]["task_records"]
+    assert "ChatGPT" in result["memory"]["task_records"][0]["task_description"]
+    assert result["memory"]["task_records"][0]["success_versions"]
 
 
-def test_runtime_memory_search_exposes_baseline_version_without_success(tmp_path):
+def test_runtime_memory_search_exposes_empty_success_candidates_without_success(tmp_path):
     runtime = _runtime(tmp_path)
     runtime.memory_store.commit_task_record(
         user_query="Open Chrome and go to ChatGPT.",
@@ -342,9 +342,9 @@ def test_runtime_memory_search_exposes_baseline_version_without_success(tmp_path
     runtime.create_task("Open Chrome and go to ChatGPT.", task_id="task-1")
     result = runtime.memory_search("task-1")
 
-    card = result["memory"]["task_cards"][0]
-    assert card["latest_success_version"] is None
-    assert card["baseline_version"] is not None
+    record = result["memory"]["task_records"][0]
+    assert record["latest_success_version_id"] is None
+    assert record["success_versions"] == []
 
 
 def test_runtime_memory_select_marks_selected_card_and_loads_full_record(tmp_path):
@@ -367,9 +367,43 @@ def test_runtime_memory_select_marks_selected_card_and_loads_full_record(tmp_pat
 
     assert select_result["record_id"] == record_id
     assert select_result["memory"]["selected_record_id"] == record_id
-    assert select_result["memory"]["task_cards"][0]["selected"] is True
+    assert select_result["memory"]["task_records"][0]["selected"] is True
     assert record_result["record"]["record_id"] == record_id
     assert record_result["record"]["versions"][0]["sequence"][0]["action_name"] == "open_chrome"
+
+
+def test_runtime_memory_commit_passes_explicit_base_version(tmp_path):
+    runtime = _runtime(tmp_path)
+    committed = runtime.memory_store.commit_task_record(
+        user_query="Open Chrome and go to ChatGPT.",
+        task_description="Open Chrome and navigate to ChatGPT.",
+        sequence=[{"action_name": "open_chrome", "status": "success", "duration": 1}],
+        run_status="success",
+        run_note="Initial run.",
+        elapsed_time=100.0,
+        change_summary="Initial sequence.",
+        change_reason="First run.",
+    )
+    record_id = committed["record"]["record_id"]
+    root_version_id = committed["version_id"]
+    runtime.create_task("Open Chrome and go to ChatGPT.", task_id="task-1")
+    runtime.memory_select("task-1", record_id=record_id)
+
+    result = runtime.memory_commit(
+        "task-1",
+        {
+            "task_description": "Open Chrome and navigate to ChatGPT.",
+            "sequence": [{"action_name": "navigate_chatgpt", "status": "success", "duration": 1}],
+            "run_status": "success",
+            "run_note": "Refined run.",
+            "elapsed_time": 90.0,
+            "change_summary": "Refined sequence.",
+            "change_reason": "Use explicit chosen draft.",
+            "base_version_id": root_version_id,
+        },
+    )
+
+    assert result["memory_commit"]["record"]["versions"][-1]["parent_version_id"] == root_version_id
 
 
 def test_runtime_memory_commit_uses_selected_record_by_default(tmp_path):
