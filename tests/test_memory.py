@@ -60,6 +60,30 @@ def test_commit_same_sequence_appends_run_record(tmp_path):
     assert updated["action"] == "append_run"
 
 
+def test_commit_normalizes_legacy_millisecond_timings(tmp_path):
+    store = MemoryStore(memory_dir=tmp_path / "memories")
+
+    created = store.commit_task_record(
+        user_query="Open Chrome and go to ChatGPT.",
+        task_description="Open Chrome, navigate to ChatGPT, and ask a question.",
+        sequence=[
+            {"action_name": "hotkey:ctrl+l", "status": "success", "duration": 455.0},
+            {"action_name": "wait:3s", "status": "success", "duration": 3000.0},
+        ],
+        run_status="success",
+        run_note="Legacy millisecond timing input.",
+        elapsed_time=303000.0,
+        change_summary="Initial raw sequence capture.",
+        change_reason="First execution of the task.",
+    )
+
+    record = store.get_task_record(created["record"]["record_id"])
+    assert record is not None
+    assert record.versions[0].sequence[0].duration == 0.455
+    assert record.versions[0].sequence[1].duration == 3.0
+    assert record.versions[0].run_records[0].elapsed_time == 303.0
+
+
 def test_commit_changed_sequence_appends_new_version(tmp_path):
     store = MemoryStore(memory_dir=tmp_path / "memories")
     created = store.commit_task_record(
@@ -198,3 +222,20 @@ def test_task_card_exposes_baseline_version_when_no_success_exists(tmp_path):
     assert card["latest_success_version"] is None
     assert card["baseline_version"] is not None
     assert card["baseline_version"]["sequence"][0]["action_name"] == "open_chrome"
+
+
+def test_derive_sequence_from_events_uses_seconds(tmp_path):
+    store = MemoryStore(memory_dir=tmp_path / "memories")
+
+    sequence = store.derive_sequence_from_events(
+        [
+            {
+                "type": "action",
+                "action": {"fingerprint": "press:enter"},
+                "primitive_status": "success",
+                "duration_ms": 1250.0,
+            }
+        ]
+    )
+
+    assert sequence[0]["duration"] == 1.25

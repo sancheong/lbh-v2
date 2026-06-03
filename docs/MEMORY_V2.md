@@ -32,12 +32,12 @@ Each sequence step contains:
 
 - `action_name`
 - `status`
-- `duration`
+- `duration` (seconds)
 
 Each run record contains:
 
 - `status`
-- `elapsed_time`
+- `elapsed_time` (seconds)
 - `note`
 
 ## Operational flow
@@ -49,6 +49,8 @@ Each run record contains:
 5. Fall back to `baseline_version` when no successful version exists yet.
 6. Execute and adapt the sequence as needed.
 7. Commit the result with `memory-commit`.
+
+When providing timing fields to `memory-commit`, record them in seconds rather than milliseconds.
 
 ## Sequence evolution
 

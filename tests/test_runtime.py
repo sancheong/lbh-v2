@@ -433,6 +433,24 @@ def test_runtime_memory_commit_returns_sequence_improvement_signals_and_lifecycl
     assert result["lifecycle_warnings"]
 
 
+def test_runtime_memory_commit_defaults_elapsed_time_in_seconds(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    runtime.create_task("Open ChatGPT.", task_id="task-1")
+    monkeypatch.setattr(runtime, "_events_wall_clock_seconds", lambda events: 42.5)
+
+    result = runtime.memory_commit(
+        "task-1",
+        {
+            "task_description": "Open ChatGPT.",
+            "sequence": [{"action_name": "press:enter", "status": "success", "duration": 1.25}],
+            "run_status": "success",
+            "run_note": "Used default elapsed time.",
+        },
+    )
+
+    assert result["memory_commit"]["run_record"]["elapsed_time"] == 42.5
+
+
 def test_runtime_status_returns_sequence_improvement_signals_and_lifecycle_warnings(tmp_path):
     runtime = _runtime(tmp_path)
     runtime.create_task("Open ChatGPT.", task_id="task-1")

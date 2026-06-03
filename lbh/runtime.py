@@ -526,7 +526,7 @@ class LBHRuntime:
             sequence=sequence,
             run_status=str(payload.get("run_status") or "success"),
             run_note=str(payload.get("run_note") or ""),
-            elapsed_time=float(payload.get("elapsed_time") or self._events_wall_clock_ms(events)),
+            elapsed_time=float(payload.get("elapsed_time") or self._events_wall_clock_seconds(events)),
             change_summary=str(payload.get("change_summary") or ""),
             change_reason=str(payload.get("change_reason") or ""),
             record_id=target_record_id,
@@ -925,6 +925,9 @@ class LBHRuntime:
         started = datetime.fromisoformat(str(timestamps[0]))
         ended = datetime.fromisoformat(str(timestamps[-1]))
         return round((ended - started).total_seconds() * 1000.0, 3)
+
+    def _events_wall_clock_seconds(self, events: list[dict[str, Any]]) -> float:
+        return round(self._events_wall_clock_ms(events) / 1000.0, 3)
 
     def _count_recoveries(self, events: list[dict[str, Any]]) -> int:
         seen_failure = False

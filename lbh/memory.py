@@ -8,6 +8,8 @@ from .common import MEMORY_DIR, append_jsonl, ensure_dir, now_iso, tokenise
 from .contracts import RunRecord, SequenceStepRecord, SequenceVersionRecord, TaskMemoryRecord
 
 RECENT_FAILURE_LIMIT = 3
+LEGACY_STEP_DURATION_MS_THRESHOLD = 100.0
+LEGACY_RUN_ELAPSED_MS_THRESHOLD = 1000.0
 
 
 def jaccard_similarity(left: Iterable[str], right: Iterable[str]) -> float:
@@ -89,7 +91,7 @@ class MemoryStore:
         return payload
 
     def list_task_records(self) -> list[TaskMemoryRecord]:
-        return [TaskMemoryRecord.from_dict(item) for item in self._read_jsonl(self.task_records_path)]
+        return [self._normalise_task_record_time_units(TaskMemoryRecord.from_dict(item)) for item in self._read_jsonl(self.task_records_path)]
 
     def get_task_record(self, record_id: str) -> TaskMemoryRecord | None:
         for record in self.list_task_records():
@@ -134,7 +136,7 @@ class MemoryStore:
         run_record = RunRecord(
             run_id=f"run-{uuid.uuid4().hex[:12]}",
             status=run_status,
-            elapsed_time=round(float(elapsed_time), 3),
+            elapsed_time=self._normalise_elapsed_seconds(elapsed_time),
             note=run_note,
             created_at=now_iso(),
         )
@@ -225,7 +227,7 @@ class MemoryStore:
                 {
                     "action_name": str(action_name),
                     "status": str(status),
-                    "duration": round(float(event.get("duration_ms", 0.0)), 3),
+                    "duration": round(float(event.get("duration_ms", 0.0)) / 1000.0, 3),
                 }
             )
         return steps
@@ -260,7 +262,76 @@ class MemoryStore:
                 normalised.append(item)
             else:
                 normalised.append(SequenceStepRecord.from_dict(item))
-        return normalised
+        step_durations = [float(step.duration) for step in normalised]
+        uses_legacy_milliseconds = bool(step_durations) and max(step_durations) >= LEGACY_STEP_DURATION_MS_THRESHOLD
+        return [
+            SequenceStepRecord(
+                action_name=step.action_name,
+                status=step.status,
+                duration=self._normalise_step_duration_seconds(step.duration, assume_milliseconds=uses_legacy_milliseconds),
+            )
+            for step in normalised
+        ]
+
+    def _normalise_task_record_time_units(self, record: TaskMemoryRecord) -> TaskMemoryRecord:
+        normalized_versions: list[SequenceVersionRecord] = []
+        for version in record.versions:
+            step_durations = [float(step.duration) for step in version.sequence]
+            uses_legacy_milliseconds = bool(step_durations) and max(step_durations) >= LEGACY_STEP_DURATION_MS_THRESHOLD
+            normalized_versions.append(
+                SequenceVersionRecord(
+                    version_id=version.version_id,
+                    parent_version_id=version.parent_version_id,
+                    change_summary=version.change_summary,
+                    change_reason=version.change_reason,
+                    sequence=[
+                        SequenceStepRecord(
+                            action_name=step.action_name,
+                            status=step.status,
+                            duration=self._normalise_step_duration_seconds(
+                                step.duration,
+                                assume_milliseconds=uses_legacy_milliseconds,
+                            ),
+                        )
+                        for step in version.sequence
+                    ],
+                    run_records=[
+                        RunRecord(
+                            run_id=run.run_id,
+                            status=run.status,
+                            elapsed_time=self._normalise_elapsed_seconds(run.elapsed_time),
+                            note=run.note,
+                            created_at=run.created_at,
+                        )
+                        for run in version.run_records
+                    ],
+                    created_at=version.created_at,
+                    updated_at=version.updated_at,
+                )
+            )
+        return TaskMemoryRecord(
+            record_id=record.record_id,
+            user_query=record.user_query,
+            task_description=record.task_description,
+            versions=normalized_versions,
+            root_version_id=record.root_version_id,
+            latest_version_id=record.latest_version_id,
+            latest_success_version_id=record.latest_success_version_id,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
+
+    def _normalise_step_duration_seconds(self, value: float, *, assume_milliseconds: bool) -> float:
+        duration = float(value or 0.0)
+        if assume_milliseconds:
+            duration /= 1000.0
+        return round(duration, 3)
+
+    def _normalise_elapsed_seconds(self, value: float) -> float:
+        elapsed = float(value or 0.0)
+        if elapsed >= LEGACY_RUN_ELAPSED_MS_THRESHOLD:
+            elapsed /= 1000.0
+        return round(elapsed, 3)
 
     def _sequence_signature(self, sequence: list[SequenceStepRecord]) -> tuple[str, ...]:
         return tuple(step.action_name for step in sequence)

@@ -22,6 +22,7 @@ You are controlling a visible local desktop GUI through **LBH V2**.
 - Use `latest_success_version` as the primary draft and `baseline_version` as fallback when no success exists yet.
 - Treat `semantic_failure` as feedback that the current sequence is still hard to confirm.
 - Improve the next sequence using general GUI and browser common sense instead of adding narrow special-case rules.
+- When calling `memory-commit`, record timing fields in seconds, not milliseconds.
 - Only call `finish` when the final answer or artifact is captured.
 
 ## Core loop
