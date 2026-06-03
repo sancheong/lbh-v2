@@ -403,6 +403,40 @@ def test_runtime_memory_commit_uses_selected_record_by_default(tmp_path):
     assert result["memory_commit"]["action"] == "append_run"
 
 
+def test_runtime_memory_commit_failed_changed_sequence_appends_run(tmp_path):
+    runtime = _runtime(tmp_path)
+    committed = runtime.memory_store.commit_task_record(
+        user_query="Open Chrome and go to ChatGPT.",
+        task_description="Open Chrome and navigate to ChatGPT.",
+        sequence=[{"action_name": "open_chrome", "status": "success", "duration": 1}],
+        run_status="success",
+        run_note="Initial run.",
+        elapsed_time=100.0,
+        change_summary="Initial sequence.",
+        change_reason="First run.",
+    )
+    record_id = committed["record"]["record_id"]
+    runtime.create_task("Open Chrome and go to ChatGPT.", task_id="task-1")
+    runtime.memory_select("task-1", record_id=record_id)
+
+    result = runtime.memory_commit(
+        "task-1",
+        {
+            "task_description": "Open Chrome and navigate to ChatGPT.",
+            "sequence": [{"action_name": "press:end", "status": "success", "duration": 1}],
+            "run_status": "failure",
+            "run_note": "Response did not appear.",
+            "elapsed_time": 120.0,
+            "change_summary": "Failure branch.",
+            "change_reason": "Should stay as run history only.",
+        },
+    )
+
+    assert result["memory_commit"]["record"]["record_id"] == record_id
+    assert result["memory_commit"]["action"] == "append_run"
+    assert len(result["memory_commit"]["record"]["versions"]) == 1
+
+
 def test_runtime_memory_commit_returns_sequence_improvement_signals_and_lifecycle_warning(tmp_path):
     runtime = _runtime(tmp_path)
     runtime.create_task("Open ChatGPT.", task_id="task-1")

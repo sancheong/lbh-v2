@@ -122,6 +122,44 @@ def test_commit_changed_sequence_appends_new_version(tmp_path):
     assert record.versions[-1].parent_version_id == record.versions[0].version_id
 
 
+def test_commit_failed_changed_sequence_appends_run_instead_of_version(tmp_path):
+    store = MemoryStore(memory_dir=tmp_path / "memories")
+    created = store.commit_task_record(
+        user_query="Open Chrome and go to ChatGPT.",
+        task_description="Open Chrome, navigate to ChatGPT, and ask a question.",
+        sequence=[
+            {"action_name": "hotkey:ctrl+l", "status": "success", "duration": 10},
+            {"action_name": "clipboard_set:url", "status": "success", "duration": 5},
+        ],
+        run_status="success",
+        run_note="Initial run.",
+        elapsed_time=420.0,
+        change_summary="Initial raw sequence capture.",
+        change_reason="First execution of the task.",
+    )
+
+    updated = store.commit_task_record(
+        record_id=created["record"]["record_id"],
+        user_query="Open Chrome and go to ChatGPT.",
+        task_description="Open Chrome, navigate to ChatGPT, and ask a question.",
+        sequence=[
+            {"action_name": "press:end", "status": "success", "duration": 4},
+            {"action_name": "press:pagedown", "status": "success", "duration": 4},
+        ],
+        run_status="failure",
+        run_note="Response never appeared.",
+        elapsed_time=500.0,
+        change_summary="Failure branch should not become a new version.",
+        change_reason="Failures are kept as run history only.",
+    )
+
+    record = store.get_task_record(updated["record"]["record_id"])
+    assert len(record.versions) == 1
+    assert len(record.versions[0].run_records) == 2
+    assert updated["action"] == "append_run"
+    assert record.latest_success_version_id == record.versions[0].version_id
+
+
 def test_search_returns_matching_task_records(tmp_path):
     store = MemoryStore(memory_dir=tmp_path / "memories")
     first = store.commit_task_record(

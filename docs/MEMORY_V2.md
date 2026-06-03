@@ -58,6 +58,7 @@ When providing timing fields to `memory-commit`, record them in seconds rather t
 - Later versions may use a refined sequence when Codex is intentionally evolving the draft.
 - If the final sequence is unchanged, append only a new run record.
 - If the final sequence changed through merge, delete, or add, append a new version.
+- Failed executions stay in run history even when the attempted sequence diverged from the latest successful draft.
 - The direct parent for a new version is the latest successful version.
 - The root version is preserved even if it was a failure.
 

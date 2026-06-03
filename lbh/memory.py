@@ -141,35 +141,12 @@ class MemoryStore:
             created_at=now_iso(),
         )
 
-        if baseline_version and self._sequence_signature(baseline_version.sequence) == self._sequence_signature(normalized_sequence):
-            updated_versions: list[SequenceVersionRecord] = []
-            for version in target_record.versions:
-                if version.version_id == baseline_version.version_id:
-                    updated_versions.append(
-                        SequenceVersionRecord(
-                            version_id=version.version_id,
-                            parent_version_id=version.parent_version_id,
-                            change_summary=version.change_summary,
-                            change_reason=version.change_reason,
-                            sequence=version.sequence,
-                            run_records=[*version.run_records, run_record],
-                            created_at=version.created_at,
-                            updated_at=now_iso(),
-                        )
-                    )
-                else:
-                    updated_versions.append(version)
-            updated_record = TaskMemoryRecord(
-                record_id=target_record.record_id,
-                user_query=target_record.user_query,
-                task_description=target_record.task_description,
-                versions=updated_versions,
-                root_version_id=target_record.root_version_id,
-                latest_version_id=target_record.latest_version_id,
-                latest_success_version_id=self._latest_success_version_id(updated_versions, target_record.latest_success_version_id),
-                created_at=target_record.created_at,
-                updated_at=now_iso(),
-            )
+        should_append_run = bool(baseline_version) and (
+            run_status != "success"
+            or self._sequence_signature(baseline_version.sequence) == self._sequence_signature(normalized_sequence)
+        )
+        if should_append_run:
+            updated_record = self._append_run_to_version(target_record, baseline_version.version_id, run_record)
             records[updated_record.record_id] = updated_record
             self._rewrite_task_records(records.values())
             return {
@@ -421,3 +398,38 @@ class MemoryStore:
             "updated_at": record.updated_at,
             "versions": [version.to_dict() for version in record.versions],
         }
+
+    def _append_run_to_version(
+        self,
+        record: TaskMemoryRecord,
+        version_id: str,
+        run_record: RunRecord,
+    ) -> TaskMemoryRecord:
+        updated_versions: list[SequenceVersionRecord] = []
+        for version in record.versions:
+            if version.version_id == version_id:
+                updated_versions.append(
+                    SequenceVersionRecord(
+                        version_id=version.version_id,
+                        parent_version_id=version.parent_version_id,
+                        change_summary=version.change_summary,
+                        change_reason=version.change_reason,
+                        sequence=version.sequence,
+                        run_records=[*version.run_records, run_record],
+                        created_at=version.created_at,
+                        updated_at=now_iso(),
+                    )
+                )
+            else:
+                updated_versions.append(version)
+        return TaskMemoryRecord(
+            record_id=record.record_id,
+            user_query=record.user_query,
+            task_description=record.task_description,
+            versions=updated_versions,
+            root_version_id=record.root_version_id,
+            latest_version_id=record.latest_version_id,
+            latest_success_version_id=self._latest_success_version_id(updated_versions, record.latest_success_version_id),
+            created_at=record.created_at,
+            updated_at=now_iso(),
+        )
