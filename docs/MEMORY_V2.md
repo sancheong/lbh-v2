@@ -1,34 +1,73 @@
 # LBH V2 Memory
 
-LBH V2 stores memory as JSONL files under `memories/`.
+LBH V2 now uses a passive task-record memory model.
 
-## Memory types
+## Core principle
 
-- `episodes.jsonl`
-  Summaries of completed tasks, including window-title history, action fingerprints, latency summary, and failure events.
-- `failure_guards.jsonl`
-  Guard records for semantically failed or repeatedly unproductive action patterns.
-- `skills.jsonl`
-  Candidate reusable action sequences derived from successful traces and successful batches.
-- `locator_memory.jsonl`
-  Parsed locator outputs for repeated target finding.
+- Memory is a storage layer.
+- Codex is the interpreter.
+- Memory does not classify, recommend, or auto-plan.
 
-## Guard behavior
+## Stored structure
 
-- Guards can match a single primitive fingerprint such as `click:left:resized_image`.
-- Guards can also match a whole batch sequence such as `sequence:type_text:url -> press:enter`.
-- `memory-mode off` disables automatic references.
-- `memory-mode warn` returns matches without blocking execution.
-- `memory-mode block` blocks high-confidence matches unless overridden.
+Memory lives under `memories/task_records.jsonl`.
 
-## Consolidation rules
+Each task record contains:
 
-- Successful batches can create positive skill candidates.
-- Semantically failed batches generate failure guard candidates.
-- Semantically failed batches do not generate positive skill candidates.
-- Non-visual actions such as `clipboard_get` are not treated as failures just because the screen did not change.
+- `user_query`
+- `task_description`
+- `versions`
+- `root_version_id`
+- `latest_version_id`
+- `latest_success_version_id`
 
-## Practical guidance
+Each version contains:
 
-- If a navigation batch fails semantically, encode the failure as a batch guard and attach a safer replacement pattern.
-- Prefer clipboard-based URL navigation so memory can distinguish `type_text:url` failures from `clipboard_set:url` successes.
+- `change_summary`
+- `change_reason`
+- `sequence`
+- `run_records`
+
+Each sequence step contains:
+
+- `action_name`
+- `status`
+- `duration`
+
+Each run record contains:
+
+- `status`
+- `elapsed_time`
+- `note`
+
+## Operational flow
+
+1. Run `memory-search` at task start.
+2. Read the returned task cards.
+3. Select a record with `memory-select` when the task matches.
+4. Use `latest_success_version` as the primary draft when available.
+5. Fall back to `baseline_version` when no successful version exists yet.
+6. Execute and adapt the sequence as needed.
+7. Commit the result with `memory-commit`.
+
+## Sequence evolution
+
+- If the final sequence is unchanged, append only a new run record.
+- If the final sequence changed through merge, delete, or add, append a new version.
+- The direct parent for a new version is the latest successful version.
+- The root version is preserved even if it was a failure.
+
+## Semantic failures
+
+`semantic_failure` is not treated as a memory-layer planning rule.
+
+Instead, it is used as a signal that the current sequence is still unstable or hard to confirm.
+
+Codex should use semantic-failure signals to improve the next version by preferring:
+
+- browser-default interactions such as `ctrl+l`, paste, and `enter`
+- explicit visible targets over fragile focus traversal
+- copy buttons over `ctrl+a` / `ctrl+c` when possible
+- steps whose success is easier to confirm from normal GUI evidence
+
+The goal is not to eliminate semantic failures completely. The goal is to evolve toward more stable and more confirmable GUI sequences.

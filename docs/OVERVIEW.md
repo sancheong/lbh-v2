@@ -39,8 +39,9 @@ python -m lbh.cli finish --task <task-id> --answer "Captured the visible result.
 - [x] Resized-image to desktop conversion
 - [x] Dynamic action batches
 - [x] Observation not forced after every primitive
-- [x] Actionable memory guards
-- [x] Skill candidate generation
+- [x] Passive task-record memory
+- [x] Task-card memory summaries
+- [x] Explicit memory select / record / commit flow
 - [x] `wait-stable`
 - [x] Benchmark command
 - [x] Benchmark report command

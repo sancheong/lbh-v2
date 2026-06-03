@@ -8,7 +8,7 @@ LBH V2 is designed to be faster than V1 by reducing unnecessary screenshot, LLM,
 - Coordinates are converted explicitly instead of relying on ad hoc click helpers.
 - Dynamic batches reduce full observe/evaluate cycles between deterministic primitives.
 - `wait-stable` avoids asking the model whether a page has stopped moving.
-- Failure guards and skill candidates reduce repeated bad retries.
+- Passive task-record memory reduces repeated rediscovery when a stable successful version already exists.
 
 ## Benchmark command
 
@@ -36,6 +36,7 @@ python -m lbh.cli benchmark-report --task <task-id>
 - batch count and total batch time
 - approximate Codex decision points from observation count
 - failed or semantically failed event count
+- sequence improvement signals derived from semantic failures
 - recovery count after failures
 - memory consolidation time
 - screenshot byte sizes
@@ -44,5 +45,6 @@ python -m lbh.cli benchmark-report --task <task-id>
 ## Recommended usage
 
 - Use explicit expectations on navigation and submit batches so semantic failures show up in the report.
+- Treat semantic failures in the report as sequence-improvement signals, not as proof that the entire task failed.
 - Use `wait-stable` instead of repeated visual checks when waiting for navigation or response completion.
 - Prefer clipboard paste for URLs and long prompts to avoid IME-related recovery loops.

@@ -429,7 +429,15 @@ class LBHRuntime:
 
     def status(self, task: str | Path, *, event_limit: int = 5) -> dict[str, Any]:
         state = self.task_store.load_state(task)
-        return {"status": "success", "task": state.to_dict(), "paths": self.paths_payload(state.task_dir), "recent_events": self.task_store.read_events(task, limit=event_limit)}
+        events = self.task_store.read_events(task)
+        return {
+            "status": "success",
+            "task": state.to_dict(),
+            "paths": self.paths_payload(state.task_dir),
+            "recent_events": events[-event_limit:] if event_limit is not None else events,
+            "sequence_improvement_signals": self._sequence_improvement_signals(events),
+            "lifecycle_warnings": self._lifecycle_warnings(state, events),
+        }
 
     def memory_search(self, task: str | Path, *, query: str | None = None, limit: int = 5) -> dict[str, Any]:
         state = self.task_store.load_state(task)
@@ -511,6 +519,9 @@ class LBHRuntime:
             change_reason=str(payload.get("change_reason") or ""),
             record_id=payload.get("record_id") or state.selected_memory_record_id,
         )
+        post_commit_events = [*events, {"type": "memory_commit"}]
+        sequence_improvement_signals = self._sequence_improvement_signals(events)
+        lifecycle_warnings = self._lifecycle_warnings(state, post_commit_events)
         state.selected_memory_record_id = commit_result["record"]["record_id"]
         self.task_store.append_memory_update(
             task,
@@ -529,13 +540,20 @@ class LBHRuntime:
             "Committed passive task-record memory.",
             status="success",
             memory_commit=commit_result,
+            sequence_improvement_signals=sequence_improvement_signals,
+            lifecycle_warnings=lifecycle_warnings,
         )
         state.memory_context = self._decorate_memory_context(
             self.memory_store.search(goal=state.goal, observation=state.latest_observation, limit=5),
             selected_record_id=state.selected_memory_record_id,
         )
         self.task_store.save_state(state)
-        return {"status": "success", "memory_commit": commit_result}
+        return {
+            "status": "success",
+            "memory_commit": commit_result,
+            "sequence_improvement_signals": sequence_improvement_signals,
+            "lifecycle_warnings": lifecycle_warnings,
+        }
 
     def wait_stable(
         self,
@@ -614,6 +632,8 @@ class LBHRuntime:
             ],
             "recovery_count": self._count_recoveries(events),
             "memory_consolidation_ms": float(state.latency_metrics.get("memory_consolidation_ms", 0.0)),
+            "sequence_improvement_signals": self._sequence_improvement_signals(events),
+            "lifecycle_warnings": self._lifecycle_warnings(state, events),
             "screenshot_sizes": [
                 {
                     "path": event.get("observation", {}).get("screenshot_path"),
@@ -903,6 +923,35 @@ class LBHRuntime:
                 recoveries += 1
                 seen_failure = False
         return recoveries
+
+    def _sequence_improvement_signals(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        signals: list[dict[str, Any]] = []
+        for event in events:
+            if event.get("status") != "semantic_failure":
+                continue
+            semantic = event.get("semantic_evaluation") or {}
+            entry = {
+                "event_type": event.get("type"),
+                "summary": event.get("summary"),
+                "reason": semantic.get("reason") or event.get("summary"),
+                "sequence_fingerprint": semantic.get("sequence_fingerprint"),
+                "action_fingerprint": ((event.get("action") or {}).get("fingerprint") if event.get("type") == "action" else None),
+            }
+            signals.append({key: value for key, value in entry.items() if value})
+        return signals
+
+    def _lifecycle_warnings(self, state: TaskState, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        warnings: list[dict[str, Any]] = []
+        memory_committed = any(event.get("type") == "memory_commit" for event in events)
+        finished = any(event.get("type") == "finish" for event in events)
+        if memory_committed and not finished and state.status != "completed":
+            warnings.append(
+                {
+                    "code": "memory_committed_task_not_finished",
+                    "message": "Memory was committed before the task was explicitly finished. Close the task lifecycle with finish when the final result is captured.",
+                }
+            )
+        return warnings
 
     def _decorate_memory_context(
         self,

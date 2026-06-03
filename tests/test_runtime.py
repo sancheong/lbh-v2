@@ -198,6 +198,8 @@ def test_benchmark_report_summarizes_task(tmp_path):
     assert report["status"] == "success"
     assert report["observation_count"] >= 1
     assert report["primitive_action_count"] >= 1
+    assert "sequence_improvement_signals" in report
+    assert "lifecycle_warnings" in report
 
 
 def test_runtime_memory_commit_derives_raw_sequence(tmp_path):
@@ -325,6 +327,66 @@ def test_runtime_memory_commit_uses_selected_record_by_default(tmp_path):
 
     assert result["memory_commit"]["record"]["record_id"] == record_id
     assert result["memory_commit"]["action"] == "append_run"
+
+
+def test_runtime_memory_commit_returns_sequence_improvement_signals_and_lifecycle_warning(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.create_task("Open ChatGPT.", task_id="task-1")
+    runtime.execute_batch(
+        "task-1",
+        {
+            "observe_after": False,
+            "expectation": {"title_contains_any": ["ChatGPT"], "require_changed": True},
+            "actions": [
+                {"type": "press", "key": "enter", "reason": "Navigate"},
+            ],
+        },
+    )
+
+    result = runtime.memory_commit(
+        "task-1",
+        {
+            "task_description": "Open ChatGPT.",
+            "sequence": [{"action_name": "press:enter", "status": "success", "duration": 1}],
+            "run_status": "failure",
+            "run_note": "Still unstable.",
+            "elapsed_time": 10.0,
+        },
+    )
+
+    assert result["sequence_improvement_signals"]
+    assert result["sequence_improvement_signals"][0]["event_type"] == "batch"
+    assert result["lifecycle_warnings"]
+
+
+def test_runtime_status_returns_sequence_improvement_signals_and_lifecycle_warnings(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.create_task("Open ChatGPT.", task_id="task-1")
+    runtime.execute_batch(
+        "task-1",
+        {
+            "observe_after": False,
+            "expectation": {"title_contains_any": ["ChatGPT"], "require_changed": True},
+            "actions": [
+                {"type": "press", "key": "enter", "reason": "Navigate"},
+            ],
+        },
+    )
+    runtime.memory_commit(
+        "task-1",
+        {
+            "task_description": "Open ChatGPT.",
+            "sequence": [{"action_name": "press:enter", "status": "success", "duration": 1}],
+            "run_status": "failure",
+            "run_note": "Still unstable.",
+            "elapsed_time": 10.0,
+        },
+    )
+
+    status = runtime.status("task-1", event_limit=10)
+
+    assert status["sequence_improvement_signals"]
+    assert status["lifecycle_warnings"]
 
 
 def test_runtime_memory_commit_requires_core_fields(tmp_path):

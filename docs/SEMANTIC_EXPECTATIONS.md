@@ -39,6 +39,8 @@ Semantic expectations let a primitive action or dynamic batch fail even when the
 
 If the final title is a search page, the batch becomes `semantic_failure`.
 
+That does not automatically mean the whole task failed. In LBH V2, mid-task semantic failures are treated as sequence-improvement signals when the final task can still be recovered.
+
 ## Non-visual actions
 
 - `clipboard_set`
@@ -70,3 +72,8 @@ These actions can succeed without any visible screen change. Do not require visu
 - Primitive execution success is not semantic success.
 - Screen change alone is not semantic success.
 - Explicit expectations should be attached whenever the next visible state matters.
+- A semantic failure in the middle of a task should usually push Codex toward a more confirmable next version, not toward special-case memory rules.
+- Prefer GUI and browser common sense when reducing semantic failures:
+  - paste for URLs and long text
+  - explicit clicks over fragile focus traversal
+  - browser-provided copy controls over generic select-all copying
