@@ -43,4 +43,6 @@ python -m lbh.cli finish --task <task-id> --answer "Captured the visible result.
 - [x] Skill candidate generation
 - [x] `wait-stable`
 - [x] Benchmark command
+- [x] Benchmark report command
+- [x] Batch semantic expectations
 - [x] Codex-facing prompt contract

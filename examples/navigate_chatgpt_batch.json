@@ -1,8 +1,13 @@
 {
   "observe_after": true,
   "stop_on_error": true,
-  "max_duration_seconds": 12,
+  "max_duration_ms": 12000,
   "reason": "Chrome is foregrounded and address bar navigation is deterministic.",
+  "expectation": {
+    "title_contains_any": ["ChatGPT"],
+    "title_not_contains_any": ["Google Search", "Search"],
+    "require_changed": true
+  },
   "actions": [
     {
       "type": "hotkey",

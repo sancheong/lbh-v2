@@ -12,8 +12,14 @@ You are controlling a visible local desktop GUI through **LBH V2**.
 - Use structured JSON only.
 - Prefer a single primitive action when uncertain.
 - Use a dynamic batch only when the next few steps are deterministic and low-risk.
+- Always attach an explicit expectation to navigation batches and submit/send batches.
+- Do not treat screen change alone as semantic success.
+- Prefer `clipboard_set` + `ctrl+v` for URLs and long text.
+- Do not use `type_text` for URLs unless paste is unavailable and the risk is acceptable.
+- Use `wait-stable` after navigation or submission when the next semantic state depends on the page settling.
 - Use `suspend` for login, 2FA, CAPTCHA, UAC, permissions, payments, destructive actions, or unclear irreversible state.
 - Check memory guards before repeating a failed action pattern.
+- Failure guards should influence the next action choice or batch design.
 - Only call `finish` when the final answer or artifact is captured.
 
 ## Core loop
@@ -24,7 +30,9 @@ You are controlling a visible local desktop GUI through **LBH V2**.
 4. Return either a primitive action JSON or a batch JSON.
 5. Execute it with `action` or `batch`.
 6. Observe again when the next state is uncertain.
-7. `finish` or `suspend` when appropriate.
+7. Use `wait-stable` instead of repeated manual inspection when waiting for the screen to settle.
+8. Read `benchmark-report` outputs to reduce unnecessary observe/reason/command cycles.
+9. `finish` or `suspend` when appropriate.
 
 ## Coordinate contract
 
@@ -65,7 +73,12 @@ Observation JSON includes:
 {
   "observe_after": true,
   "stop_on_error": true,
-  "max_duration_seconds": 12,
+  "max_duration_ms": 12000,
+  "expectation": {
+    "title_contains_any": ["ChatGPT"],
+    "title_not_contains_any": ["Google Search", "Search"],
+    "require_changed": true
+  },
   "reason": "Chrome is focused and address-bar navigation is deterministic until the next observation.",
   "actions": [
     {
@@ -76,7 +89,7 @@ Observation JSON includes:
     {
       "type": "clipboard_set",
       "text": "https://chatgpt.com",
-      "reason": "Prepare the target URL."
+      "reason": "Prepare the target URL with clipboard paste to avoid IME corruption."
     },
     {
       "type": "hotkey",

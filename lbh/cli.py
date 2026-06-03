@@ -26,9 +26,12 @@ def runtime_from_args(args) -> LBHRuntime:
     tasks_dir = Path(getattr(args, "tasks_dir", "tasks"))
     root_dir = tasks_dir if tasks_dir.is_absolute() else Path.cwd() / tasks_dir
     memory_dir = root_dir.parent / "memories"
+    memory_mode = getattr(args, "memory_mode", None) or ("warn" if getattr(args, "use_memory", False) else "off")
     return LBHRuntime(
         task_store=TaskStore(tasks_dir=root_dir),
         memory_store=MemoryStore(memory_dir=memory_dir),
+        memory_reference_enabled=memory_mode != "off",
+        memory_mode=memory_mode,
     )
 
 
@@ -92,6 +95,11 @@ def cmd_memory_search(runtime: LBHRuntime, args) -> dict[str, Any]:
     return runtime.memory_search(args.task, query=args.query, limit=args.limit)
 
 
+def cmd_memory_commit(runtime: LBHRuntime, args) -> dict[str, Any]:
+    payload = coerce_json_input(args.json or args.memory_json or args.memory_file)
+    return runtime.memory_commit(args.task, payload)
+
+
 def cmd_wait_stable(runtime: LBHRuntime, args) -> dict[str, Any]:
     return runtime.wait_stable(
         args.task,
@@ -117,6 +125,10 @@ def cmd_benchmark(runtime: LBHRuntime, args) -> dict[str, Any]:
     )
 
 
+def cmd_benchmark_report(runtime: LBHRuntime, args) -> dict[str, Any]:
+    return runtime.benchmark_report(args.task, top_n=args.top)
+
+
 def cmd_locator_contract(runtime: LBHRuntime, args) -> dict[str, Any]:
     return runtime.locator_contract(args.task, args.target)
 
@@ -135,6 +147,8 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model-max-width", type=int, default=1280)
     parser.add_argument("--jpeg-quality", type=int, default=80)
     parser.add_argument("--save-original", action="store_true")
+    parser.add_argument("--use-memory", action="store_true")
+    parser.add_argument("--memory-mode", choices=["off", "warn", "block"])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -169,6 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--action-file")
     _bool_override(action, "observe-after", True)
     action.add_argument("--ignore-guards", action="store_true")
+    action.add_argument("--ignore-memory-guards", dest="ignore_guards", action="store_true")
     action.set_defaults(func=cmd_action)
 
     batch = sub.add_parser("batch")
@@ -179,6 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--actions")
     _bool_override(batch, "observe-after", True)
     batch.add_argument("--ignore-guards", action="store_true")
+    batch.add_argument("--ignore-memory-guards", dest="ignore_guards", action="store_true")
     batch.set_defaults(func=cmd_batch)
 
     finish = sub.add_parser("finish")
@@ -216,6 +232,15 @@ def build_parser() -> argparse.ArgumentParser:
     memory_search.add_argument("--limit", type=int, default=5)
     memory_search.set_defaults(func=cmd_memory_search)
 
+    memory_commit = sub.add_parser("memory-commit")
+    add_common(memory_commit)
+    memory_commit.add_argument("--task", required=True)
+    group = memory_commit.add_mutually_exclusive_group(required=True)
+    group.add_argument("--json")
+    group.add_argument("--memory-json")
+    group.add_argument("--memory-file")
+    memory_commit.set_defaults(func=cmd_memory_commit)
+
     wait_stable = sub.add_parser("wait-stable")
     add_common(wait_stable)
     wait_stable.add_argument("--task", required=True)
@@ -235,7 +260,14 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--interval", type=float, default=1.0)
     benchmark.add_argument("--sample-count", type=int, default=5000)
     benchmark.add_argument("--ignore-guards", action="store_true")
+    benchmark.add_argument("--ignore-memory-guards", dest="ignore_guards", action="store_true")
     benchmark.set_defaults(func=cmd_benchmark)
+
+    benchmark_report = sub.add_parser("benchmark-report")
+    add_common(benchmark_report)
+    benchmark_report.add_argument("--task", required=True)
+    benchmark_report.add_argument("--top", type=int, default=5)
+    benchmark_report.set_defaults(func=cmd_benchmark_report)
 
     locator = sub.add_parser("locator-contract")
     add_common(locator)

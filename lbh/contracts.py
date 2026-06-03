@@ -175,15 +175,65 @@ class ObservationRecord:
 @dataclass(frozen=True)
 class Expectation:
     active_window_title_contains: str | None = None
+    title_contains_any: list[str] | None = None
+    title_contains_all: list[str] | None = None
+    title_not_contains_any: list[str] | None = None
+    forbidden_title_contains_any: list[str] | None = None
+    require_changed: bool | None = None
+    allow_no_visual_change: bool | None = None
+    visual_change_expected: bool | None = None
+    non_visual_action: bool | None = None
+    success_hints_any: list[str] | None = None
+    failure_hints_any: list[str] | None = None
+    expected_clipboard_contains: str | None = None
+    expected_clipboard_equals: str | None = None
+    image_diff_threshold: float | None = None
+    allow_visual_only: bool | None = None
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any] | None) -> "Expectation | None":
         if not payload:
             return None
-        return cls(active_window_title_contains=payload.get("active_window_title_contains"))
+        title_contains_any = _coerce_string_list(payload.get("title_contains_any"))
+        if not title_contains_any and payload.get("active_window_title_contains"):
+            title_contains_any = [str(payload.get("active_window_title_contains"))]
+        return cls(
+            active_window_title_contains=payload.get("active_window_title_contains"),
+            title_contains_any=title_contains_any,
+            title_contains_all=_coerce_string_list(payload.get("title_contains_all")),
+            title_not_contains_any=_coerce_string_list(payload.get("title_not_contains_any")),
+            forbidden_title_contains_any=_coerce_string_list(payload.get("forbidden_title_contains_any")),
+            require_changed=payload.get("require_changed"),
+            allow_no_visual_change=payload.get("allow_no_visual_change"),
+            visual_change_expected=payload.get("visual_change_expected"),
+            non_visual_action=payload.get("non_visual_action"),
+            success_hints_any=_coerce_string_list(payload.get("success_hints_any")),
+            failure_hints_any=_coerce_string_list(payload.get("failure_hints_any")),
+            expected_clipboard_contains=payload.get("expected_clipboard_contains"),
+            expected_clipboard_equals=payload.get("expected_clipboard_equals"),
+            image_diff_threshold=float(payload["image_diff_threshold"]) if payload.get("image_diff_threshold") is not None else None,
+            allow_visual_only=payload.get("allow_visual_only"),
+        )
 
     def to_dict(self) -> dict[str, Any]:
-        return {"active_window_title_contains": self.active_window_title_contains}
+        payload = {
+            "active_window_title_contains": self.active_window_title_contains,
+            "title_contains_any": self.title_contains_any,
+            "title_contains_all": self.title_contains_all,
+            "title_not_contains_any": self.title_not_contains_any,
+            "forbidden_title_contains_any": self.forbidden_title_contains_any,
+            "require_changed": self.require_changed,
+            "allow_no_visual_change": self.allow_no_visual_change,
+            "visual_change_expected": self.visual_change_expected,
+            "non_visual_action": self.non_visual_action,
+            "success_hints_any": self.success_hints_any,
+            "failure_hints_any": self.failure_hints_any,
+            "expected_clipboard_contains": self.expected_clipboard_contains,
+            "expected_clipboard_equals": self.expected_clipboard_equals,
+            "image_diff_threshold": self.image_diff_threshold,
+            "allow_visual_only": self.allow_visual_only,
+        }
+        return {key: value for key, value in payload.items() if value is not None and value != []}
 
 
 @dataclass(frozen=True)
@@ -201,6 +251,10 @@ class ActionSpec:
     timeout: float | None = None
     risk: str | None = None
     title_contains: str | None = None
+    allow_no_visual_change: bool | None = None
+    visual_change_expected: bool | None = None
+    non_visual_action: bool | None = None
+    semantic_status: str | None = None
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "ActionSpec":
@@ -231,6 +285,10 @@ class ActionSpec:
             timeout=float(payload["timeout"]) if payload.get("timeout") is not None else None,
             risk=payload.get("risk") or payload.get("safety"),
             title_contains=payload.get("title_contains"),
+            allow_no_visual_change=payload.get("allow_no_visual_change"),
+            visual_change_expected=payload.get("visual_change_expected"),
+            non_visual_action=payload.get("non_visual_action"),
+            semantic_status=payload.get("semantic_status"),
         )
         spec.validate()
         return spec
@@ -255,11 +313,58 @@ class ActionSpec:
     def coordinate_space(self) -> str | None:
         return self.point.space.value if self.point else None
 
+    @property
+    def action_category(self) -> str:
+        if self.type in {"clipboard_set", "clipboard_get"}:
+            return "clipboard_action"
+        if self.type == "type_text":
+            return "text_entry_action"
+        if self.type in {"window_activate", "window_minimize", "window_maximize", "window_restore", "close_window"}:
+            return "window_action"
+        if self.type == "wait":
+            return "non_visual_action"
+        if self.type in {"press", "hotkey"}:
+            if self.key == "enter":
+                return "navigation_action"
+            keys = [item.lower() for item in (self.keys or [])]
+            if any(key in {"ctrl", "alt", "shift"} for key in keys):
+                return "navigation_action"
+        return "visual_action"
+
+    @property
+    def is_non_visual_action(self) -> bool:
+        if self.non_visual_action is not None:
+            return bool(self.non_visual_action)
+        if self.allow_no_visual_change:
+            return True
+        if self.type in {"clipboard_set", "clipboard_get", "wait"}:
+            return True
+        reason = (self.reason or "").lower()
+        if "copy" in reason or "clipboard" in reason:
+            return True
+        return False
+
+    @property
+    def visual_change_expected_default(self) -> bool:
+        if self.visual_change_expected is not None:
+            return bool(self.visual_change_expected)
+        return not self.is_non_visual_action
+
     def fingerprint(self) -> str:
         if self.type in POINT_ACTIONS and self.point:
             return f"{self.type}:{self.button}:{self.point.space.value}"
         if self.type == "type_text":
+            if looks_like_url(self.text):
+                return "type_text:url"
+            if self.text and len(self.text) >= 40:
+                return "type_text:long_text"
             return "type_text"
+        if self.type == "clipboard_set":
+            if looks_like_url(self.text):
+                return "clipboard_set:url"
+            if self.text and len(self.text) >= 40:
+                return "clipboard_set:long_text"
+            return "clipboard_set"
         if self.type == "press":
             return f"press:{self.key}"
         if self.type == "hotkey":
@@ -284,6 +389,11 @@ class ActionSpec:
             "keys": self.keys,
             "seconds": self.seconds,
             "title_contains": self.title_contains,
+            "allow_no_visual_change": self.allow_no_visual_change,
+            "visual_change_expected": self.visual_change_expected,
+            "non_visual_action": self.non_visual_action,
+            "semantic_status": self.semantic_status,
+            "action_category": self.action_category,
             "expectation": self.expectation.to_dict() if self.expectation else None,
         }
         if self.point:
@@ -298,7 +408,14 @@ class ActionBatch:
     observe_after: bool = True
     stop_on_error: bool = True
     max_duration_seconds: float | None = None
+    max_duration_ms: float | None = None
     reason: str = ""
+    expectation: Expectation | None = None
+    postcondition: Expectation | None = None
+    semantic_status: str | None = None
+    allow_no_visual_change: bool | None = None
+    visual_change_expected: bool | None = None
+    non_visual_action: bool | None = None
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any] | list[Mapping[str, Any]]) -> "ActionBatch":
@@ -307,19 +424,27 @@ class ActionBatch:
         actions_raw = payload.get("actions")
         if not isinstance(actions_raw, list) or not actions_raw:
             raise ValidationError("Batch JSON must include a non-empty 'actions' array.")
-        max_duration_seconds = (
-            float(payload["max_duration_seconds"])
-            if payload.get("max_duration_seconds") is not None
-            else None
-        )
+        max_duration_seconds = float(payload["max_duration_seconds"]) if payload.get("max_duration_seconds") is not None else None
+        max_duration_ms = float(payload["max_duration_ms"]) if payload.get("max_duration_ms") is not None else None
+        if max_duration_seconds is None and max_duration_ms is not None:
+            max_duration_seconds = max_duration_ms / 1000.0
         if max_duration_seconds is not None and max_duration_seconds <= 0:
             raise ValidationError("max_duration_seconds must be positive.")
+        expectation_payload = _merge_expectation_payload(payload.get("expectation"), payload)
+        postcondition_payload = _merge_expectation_payload(payload.get("postcondition"), payload)
         return cls(
             actions=[ActionSpec.from_dict(item) for item in actions_raw],
             observe_after=bool(payload.get("observe_after", True)),
             stop_on_error=bool(payload.get("stop_on_error", True)),
             max_duration_seconds=max_duration_seconds,
+            max_duration_ms=max_duration_ms,
             reason=str(payload.get("reason") or "").strip(),
+            expectation=Expectation.from_payload(expectation_payload),
+            postcondition=Expectation.from_payload(postcondition_payload),
+            semantic_status=payload.get("semantic_status"),
+            allow_no_visual_change=payload.get("allow_no_visual_change"),
+            visual_change_expected=payload.get("visual_change_expected"),
+            non_visual_action=payload.get("non_visual_action"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -328,7 +453,14 @@ class ActionBatch:
             "observe_after": self.observe_after,
             "stop_on_error": self.stop_on_error,
             "max_duration_seconds": self.max_duration_seconds,
+            "max_duration_ms": self.max_duration_ms,
             "reason": self.reason,
+            "expectation": self.expectation.to_dict() if self.expectation else None,
+            "postcondition": self.postcondition.to_dict() if self.postcondition else None,
+            "semantic_status": self.semantic_status,
+            "allow_no_visual_change": self.allow_no_visual_change,
+            "visual_change_expected": self.visual_change_expected,
+            "non_visual_action": self.non_visual_action,
         }
 
 
@@ -364,6 +496,133 @@ class LocatorResult:
             "confidence": self.confidence,
             "source": self.source,
             "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class SequenceStepRecord:
+    action_name: str
+    status: str
+    duration: float
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "SequenceStepRecord":
+        return cls(
+            action_name=str(payload.get("action_name") or ""),
+            status=str(payload.get("status") or ""),
+            duration=float(payload.get("duration", 0.0)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action_name": self.action_name,
+            "status": self.status,
+            "duration": self.duration,
+        }
+
+
+@dataclass(frozen=True)
+class RunRecord:
+    run_id: str
+    status: str
+    elapsed_time: float
+    note: str
+    created_at: str | None = None
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "RunRecord":
+        return cls(
+            run_id=str(payload.get("run_id") or ""),
+            status=str(payload.get("status") or ""),
+            elapsed_time=float(payload.get("elapsed_time", 0.0)),
+            note=str(payload.get("note") or ""),
+            created_at=payload.get("created_at"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "status": self.status,
+            "elapsed_time": self.elapsed_time,
+            "note": self.note,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True)
+class SequenceVersionRecord:
+    version_id: str
+    parent_version_id: str | None
+    change_summary: str
+    change_reason: str
+    sequence: list[SequenceStepRecord]
+    run_records: list[RunRecord]
+    created_at: str | None = None
+    updated_at: str | None = None
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "SequenceVersionRecord":
+        return cls(
+            version_id=str(payload.get("version_id") or ""),
+            parent_version_id=payload.get("parent_version_id"),
+            change_summary=str(payload.get("change_summary") or ""),
+            change_reason=str(payload.get("change_reason") or ""),
+            sequence=[SequenceStepRecord.from_dict(item) for item in payload.get("sequence", [])],
+            run_records=[RunRecord.from_dict(item) for item in payload.get("run_records", [])],
+            created_at=payload.get("created_at"),
+            updated_at=payload.get("updated_at"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "version_id": self.version_id,
+            "parent_version_id": self.parent_version_id,
+            "change_summary": self.change_summary,
+            "change_reason": self.change_reason,
+            "sequence": [item.to_dict() for item in self.sequence],
+            "run_records": [item.to_dict() for item in self.run_records],
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass(frozen=True)
+class TaskMemoryRecord:
+    record_id: str
+    user_query: str
+    task_description: str
+    versions: list[SequenceVersionRecord]
+    root_version_id: str | None = None
+    latest_version_id: str | None = None
+    latest_success_version_id: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "TaskMemoryRecord":
+        return cls(
+            record_id=str(payload.get("record_id") or ""),
+            user_query=str(payload.get("user_query") or ""),
+            task_description=str(payload.get("task_description") or ""),
+            versions=[SequenceVersionRecord.from_dict(item) for item in payload.get("versions", [])],
+            root_version_id=payload.get("root_version_id"),
+            latest_version_id=payload.get("latest_version_id"),
+            latest_success_version_id=payload.get("latest_success_version_id"),
+            created_at=payload.get("created_at"),
+            updated_at=payload.get("updated_at"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "record_id": self.record_id,
+            "user_query": self.user_query,
+            "task_description": self.task_description,
+            "versions": [item.to_dict() for item in self.versions],
+            "root_version_id": self.root_version_id,
+            "latest_version_id": self.latest_version_id,
+            "latest_success_version_id": self.latest_success_version_id,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
         }
 
 
@@ -447,3 +706,49 @@ def _extract_point(payload: Mapping[str, Any]) -> Point | None:
             space=CoordinateSpace(str(coordinate_space)),
         )
     return None
+
+
+def looks_like_url(text: str | None) -> bool:
+    if not text:
+        return False
+    candidate = text.strip().lower()
+    return candidate.startswith(("http://", "https://")) or "://" in candidate
+
+
+def _coerce_string_list(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else None
+    if isinstance(value, (list, tuple, set)):
+        items = [str(item).strip() for item in value if str(item).strip()]
+        return items or None
+    return [str(value).strip()]
+
+
+def _merge_expectation_payload(
+    expectation_payload: Mapping[str, Any] | None,
+    root_payload: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    merged: dict[str, Any] = dict(expectation_payload or {})
+    for key in [
+        "active_window_title_contains",
+        "title_contains_any",
+        "title_contains_all",
+        "title_not_contains_any",
+        "forbidden_title_contains_any",
+        "require_changed",
+        "allow_no_visual_change",
+        "visual_change_expected",
+        "non_visual_action",
+        "success_hints_any",
+        "failure_hints_any",
+        "expected_clipboard_contains",
+        "expected_clipboard_equals",
+        "image_diff_threshold",
+        "allow_visual_only",
+    ]:
+        if root_payload.get(key) is not None and key not in merged:
+            merged[key] = root_payload.get(key)
+    return merged or None

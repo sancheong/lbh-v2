@@ -36,6 +36,103 @@ def active_window_title(observation: dict[str, Any] | None) -> str:
     return str(active_window.get("title") or "").strip()
 
 
+def evaluate_expectation(
+    expectation: Expectation | dict[str, Any] | None,
+    pre_observation: dict[str, Any] | None,
+    post_observation: dict[str, Any] | None,
+    primitive_results: list[dict[str, Any]] | None,
+    clipboard_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    expectation_obj = (
+        expectation
+        if isinstance(expectation, Expectation) or expectation is None
+        else Expectation.from_payload(expectation)
+    )
+    if expectation_obj is None:
+        return {"matched": True, "status": "success", "reason": "No explicit expectation.", "checks": []}
+
+    checks: list[dict[str, Any]] = []
+    before_title = active_window_title(pre_observation)
+    after_title = active_window_title(post_observation)
+    diff_threshold = expectation_obj.image_diff_threshold or 0.015
+    diff_score = None
+    if pre_observation and post_observation:
+        diff_score = image_diff_score(pre_observation["screenshot_path"], post_observation["screenshot_path"])
+    changed = bool(before_title.lower() != after_title.lower()) or bool(diff_score is not None and diff_score >= diff_threshold)
+    clipboard_text = ""
+    if clipboard_result:
+        clipboard_text = str(clipboard_result.get("text") or "")
+    observed_text = "\n".join(
+        item
+        for item in [
+            before_title,
+            after_title,
+            clipboard_text,
+            _primitive_results_text(primitive_results or []),
+        ]
+        if item
+    )
+
+    def _check(name: str, passed: bool, observed: Any, expected: Any = None) -> None:
+        checks.append({"name": name, "passed": bool(passed), "observed": observed, "expected": expected})
+
+    if expectation_obj.active_window_title_contains:
+        passed = expectation_obj.active_window_title_contains.lower() in after_title.lower()
+        _check("active_window_title_contains", passed, after_title, expectation_obj.active_window_title_contains)
+    if expectation_obj.title_contains_any:
+        passed = any(item.lower() in after_title.lower() for item in expectation_obj.title_contains_any)
+        _check("title_contains_any", passed, after_title, expectation_obj.title_contains_any)
+    if expectation_obj.title_contains_all:
+        passed = all(item.lower() in after_title.lower() for item in expectation_obj.title_contains_all)
+        _check("title_contains_all", passed, after_title, expectation_obj.title_contains_all)
+    if expectation_obj.title_not_contains_any:
+        passed = all(item.lower() not in after_title.lower() for item in expectation_obj.title_not_contains_any)
+        _check("title_not_contains_any", passed, after_title, expectation_obj.title_not_contains_any)
+    if expectation_obj.forbidden_title_contains_any:
+        passed = all(item.lower() not in after_title.lower() for item in expectation_obj.forbidden_title_contains_any)
+        _check("forbidden_title_contains_any", passed, after_title, expectation_obj.forbidden_title_contains_any)
+    if expectation_obj.require_changed is True:
+        _check("require_changed", changed, {"changed": changed, "diff_score": diff_score}, True)
+    if expectation_obj.allow_no_visual_change is False or expectation_obj.visual_change_expected is True:
+        _check("visual_change_expected", changed, {"changed": changed, "diff_score": diff_score}, True)
+    if expectation_obj.expected_clipboard_contains is not None:
+        passed = expectation_obj.expected_clipboard_contains in clipboard_text
+        _check("expected_clipboard_contains", passed, clipboard_text, expectation_obj.expected_clipboard_contains)
+    if expectation_obj.expected_clipboard_equals is not None:
+        passed = clipboard_text == expectation_obj.expected_clipboard_equals
+        _check("expected_clipboard_equals", passed, clipboard_text, expectation_obj.expected_clipboard_equals)
+    if expectation_obj.success_hints_any:
+        passed = any(item.lower() in observed_text.lower() for item in expectation_obj.success_hints_any)
+        _check("success_hints_any", passed, observed_text, expectation_obj.success_hints_any)
+    if expectation_obj.failure_hints_any:
+        passed = all(item.lower() not in observed_text.lower() for item in expectation_obj.failure_hints_any)
+        _check("failure_hints_any", passed, observed_text, expectation_obj.failure_hints_any)
+
+    failed_checks = [item for item in checks if not item["passed"]]
+    if failed_checks:
+        failed_names = ", ".join(item["name"] for item in failed_checks)
+        return {
+            "matched": False,
+            "status": "semantic_failure",
+            "reason": f"Expectation checks failed: {failed_names}.",
+            "checks": checks,
+            "title_before": before_title,
+            "title_after": after_title,
+            "changed": changed,
+            "image_diff_score": diff_score,
+        }
+    return {
+        "matched": True,
+        "status": "success",
+        "reason": "Expectation checks passed.",
+        "checks": checks,
+        "title_before": before_title,
+        "title_after": after_title,
+        "changed": changed,
+        "image_diff_score": diff_score,
+    }
+
+
 def evaluate_observation_progress(
     previous: dict[str, Any] | None,
     current: dict[str, Any],
@@ -71,8 +168,9 @@ def evaluate_observation_progress(
     title_changed = before_title.lower() != after_title.lower()
     visual_changed = diff_score >= diff_threshold
     expectation_match = None
-    if expectation_obj and expectation_obj.active_window_title_contains:
-        expectation_match = expectation_obj.active_window_title_contains.lower() in after_title.lower()
+    if expectation_obj:
+        expectation_result = evaluate_expectation(expectation_obj, previous, current, primitive_results=[])
+        expectation_match = expectation_result["matched"] if expectation_result["checks"] else None
     changed = visual_changed or title_changed or bool(expectation_match)
     new_streak = 0 if changed else no_progress_streak + 1
     return {
@@ -162,6 +260,27 @@ class StabilityWaiter:
                     "elapsed_seconds": round(elapsed, 3),
                     "diff_threshold": diff_threshold,
                     "samples": samples,
-                    "final_observation": current.to_dict(),
-                }
+            "final_observation": current.to_dict(),
+        }
             previous = current
+
+
+def _primitive_results_text(primitive_results: list[dict[str, Any]]) -> str:
+    fragments: list[str] = []
+    for item in primitive_results:
+        action = item.get("action") or {}
+        result = item.get("result") or {}
+        error = item.get("error") or {}
+        for value in [
+            action.get("reason"),
+            action.get("type"),
+            action.get("key"),
+            " ".join(action.get("keys", [])) if action.get("keys") else None,
+            action.get("text"),
+            result.get("text"),
+            error.get("message"),
+            ((result.get("active_window_after_action") or {}).get("title") if isinstance(result.get("active_window_after_action"), dict) else None),
+        ]:
+            if value:
+                fragments.append(str(value))
+    return "\n".join(fragments)

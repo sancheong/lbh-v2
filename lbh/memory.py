@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from collections import Counter, defaultdict
 from hashlib import sha1
-from statistics import median
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
+import uuid
 
 from .common import MEMORY_DIR, append_jsonl, ensure_dir, now_iso, tokenise
+from .contracts import RunRecord, SequenceStepRecord, SequenceVersionRecord, TaskMemoryRecord
 
 
 def jaccard_similarity(left: Iterable[str], right: Iterable[str]) -> float:
@@ -19,9 +19,7 @@ def jaccard_similarity(left: Iterable[str], right: Iterable[str]) -> float:
 class MemoryStore:
     def __init__(self, memory_dir=MEMORY_DIR):
         self.memory_dir = ensure_dir(memory_dir)
-        self.episodes_path = self.memory_dir / "episodes.jsonl"
-        self.failure_guards_path = self.memory_dir / "failure_guards.jsonl"
-        self.skills_path = self.memory_dir / "skills.jsonl"
+        self.task_records_path = self.memory_dir / "task_records.jsonl"
         self.locators_path = self.memory_dir / "locator_memory.jsonl"
 
     def _read_jsonl(self, path) -> list[dict[str, Any]]:
@@ -38,19 +36,22 @@ class MemoryStore:
                 continue
         return records
 
+    def _rewrite_jsonl(self, path, records: Iterable[dict[str, Any]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+        for record in records:
+            append_jsonl(path, record)
+
     def build_situation_signature(self, goal: str, observation: dict[str, Any] | None = None) -> dict[str, Any]:
         active_title = ""
-        screenshot_hash = None
         if observation:
             active_window = observation.get("active_window") or {}
             active_title = str(active_window.get("title") or "")
-            screenshot_hash = observation.get("image_sha256")
         signature = " | ".join(part for part in (goal.strip(), active_title.strip()) if part)
         return {
             "signature": signature or goal.strip(),
             "tokens": tokenise(signature or goal),
             "active_window_title": active_title,
-            "screenshot_hash": screenshot_hash,
         }
 
     def search(
@@ -63,43 +64,10 @@ class MemoryStore:
     ) -> dict[str, Any]:
         signature = self.build_situation_signature(goal, observation)
         query_tokens = tokenise(query or signature["signature"])
-        episodes = self._rank_records(
-            self._read_jsonl(self.episodes_path),
-            query_tokens,
-            lambda item: " ".join([item.get("goal", ""), item.get("final_answer", ""), item.get("situation_signature", "")]),
-            limit,
-        )
-        guards = self._rank_records(
-            self._read_jsonl(self.failure_guards_path),
-            query_tokens,
-            lambda item: " ".join(
-                [
-                    item.get("situation_signature", ""),
-                    item.get("bad_action_pattern", ""),
-                    item.get("reason", ""),
-                    item.get("replacement_suggestion", ""),
-                ]
-            ),
-            limit,
-        )
-        skills = self._rank_records(
-            self._read_jsonl(self.skills_path),
-            query_tokens,
-            lambda item: " ".join(
-                [
-                    item.get("name", ""),
-                    item.get("precondition_signature", ""),
-                    " ".join(item.get("action_sequence", [])),
-                    item.get("postcondition_signature", ""),
-                ]
-            ),
-            limit,
-        )
+        ranked = self._rank_task_records(query_tokens, limit)
         return {
             "query_signature": signature,
-            "episodes": episodes,
-            "failure_guards": guards,
-            "skills": skills,
+            "task_records": ranked,
         }
 
     def evaluate_failure_guards(
@@ -109,234 +77,207 @@ class MemoryStore:
         observation: dict[str, Any] | None,
         action_fingerprints: list[str],
     ) -> list[dict[str, Any]]:
-        signature = self.build_situation_signature(goal, observation)
-        matches: list[dict[str, Any]] = []
-        for guard in self._read_jsonl(self.failure_guards_path):
-            situation_score = jaccard_similarity(
-                signature["tokens"],
-                guard.get("situation_tokens") or tokenise(guard.get("situation_signature", "")),
-            )
-            for fingerprint in action_fingerprints:
-                pattern = guard.get("action_fingerprint") or guard.get("bad_action_pattern", "")
-                if not pattern:
-                    continue
-                action_score = 1.0 if fingerprint == pattern else 0.65 if fingerprint.split(":")[0] == pattern.split(":")[0] else 0.0
-                if action_score == 0.0 or situation_score < 0.2:
-                    continue
-                matches.append(
-                    {
-                        "guard_id": guard.get("id"),
-                        "decision": "block" if float(guard.get("confidence", 0.75)) >= 0.85 and int(guard.get("support_count", 1)) >= 3 else "warn",
-                        "score": round((0.6 * action_score) + (0.4 * situation_score), 3),
-                        "confidence": float(guard.get("confidence", 0.75)),
-                        "support_count": int(guard.get("support_count", 1)),
-                        "failure_rate": float(guard.get("failure_rate", 1.0)),
-                        "reason": guard.get("reason"),
-                        "replacement_suggestion": guard.get("replacement_suggestion"),
-                        "action_fingerprint": fingerprint,
-                        "situation_signature": guard.get("situation_signature"),
-                    }
-                )
-        return sorted(matches, key=lambda item: (item["decision"] == "block", item["score"], item["confidence"]), reverse=True)
+        return []
 
     def consolidate_task(self, *, state, events: list[dict[str, Any]], final_answer: str) -> dict[str, Any]:
-        updates = {"episode": None, "failure_guards": [], "skills": []}
-        episode = self._build_episode(state=state, events=events, final_answer=final_answer)
-        append_jsonl(self.episodes_path, episode)
-        updates["episode"] = episode
-        updates["failure_guards"] = self._update_failure_guards(state.goal, events)
-        updates["skills"] = self._update_skill_candidates(state.goal, events)
-        return updates
+        return {}
 
     def store_locator(self, payload: dict[str, Any]) -> dict[str, Any]:
         append_jsonl(self.locators_path, payload)
         return payload
 
-    def _rank_records(self, records: list[dict[str, Any]], query_tokens: list[str], text_fn, limit: int) -> list[dict[str, Any]]:
-        ranked = []
-        for record in records:
-            score = jaccard_similarity(query_tokens, tokenise(text_fn(record)))
-            if score <= 0:
-                continue
-            ranked.append({"score": round(score, 3), **record})
-        ranked.sort(key=lambda item: item["score"], reverse=True)
-        return ranked[:limit]
+    def list_task_records(self) -> list[TaskMemoryRecord]:
+        return [TaskMemoryRecord.from_dict(item) for item in self._read_jsonl(self.task_records_path)]
 
-    def _build_episode(self, *, state, events: list[dict[str, Any]], final_answer: str) -> dict[str, Any]:
-        observation_titles = [
-            event.get("observation", {}).get("active_window", {}).get("title")
-            for event in events
-            if event.get("type") == "observation"
-        ]
-        action_fingerprints = [
-            event.get("action", {}).get("fingerprint")
-            for event in events
-            if event.get("type") == "action"
-        ]
-        latencies = [event.get("duration_ms") for event in events if isinstance(event.get("duration_ms"), (int, float))]
-        situation = self.build_situation_signature(state.goal, state.latest_observation)
+    def get_task_record(self, record_id: str) -> TaskMemoryRecord | None:
+        for record in self.list_task_records():
+            if record.record_id == record_id:
+                return record
+        return None
+
+    def commit_task_record(
+        self,
+        *,
+        user_query: str,
+        task_description: str,
+        sequence: list[Mapping[str, Any]] | list[SequenceStepRecord],
+        run_status: str,
+        run_note: str,
+        elapsed_time: float,
+        change_summary: str = "",
+        change_reason: str = "",
+        record_id: str | None = None,
+    ) -> dict[str, Any]:
+        records = {record.record_id: record for record in self.list_task_records()}
+        normalized_sequence = self._normalise_sequence(sequence)
+        target_record = records.get(record_id) if record_id else None
+        created_new_record = target_record is None
+        if target_record is None:
+            target_record = TaskMemoryRecord(
+                record_id=record_id or self._new_record_id(user_query, task_description),
+                user_query=user_query,
+                task_description=task_description,
+                versions=[],
+                created_at=now_iso(),
+                updated_at=now_iso(),
+            )
+
+        baseline_version = self._preferred_baseline_version(target_record)
+        run_record = RunRecord(
+            run_id=f"run-{uuid.uuid4().hex[:12]}",
+            status=run_status,
+            elapsed_time=round(float(elapsed_time), 3),
+            note=run_note,
+            created_at=now_iso(),
+        )
+
+        if baseline_version and self._sequence_signature(baseline_version.sequence) == self._sequence_signature(normalized_sequence):
+            updated_versions: list[SequenceVersionRecord] = []
+            for version in target_record.versions:
+                if version.version_id == baseline_version.version_id:
+                    updated_versions.append(
+                        SequenceVersionRecord(
+                            version_id=version.version_id,
+                            parent_version_id=version.parent_version_id,
+                            change_summary=version.change_summary,
+                            change_reason=version.change_reason,
+                            sequence=version.sequence,
+                            run_records=[*version.run_records, run_record],
+                            created_at=version.created_at,
+                            updated_at=now_iso(),
+                        )
+                    )
+                else:
+                    updated_versions.append(version)
+            updated_record = TaskMemoryRecord(
+                record_id=target_record.record_id,
+                user_query=target_record.user_query,
+                task_description=target_record.task_description,
+                versions=updated_versions,
+                root_version_id=target_record.root_version_id,
+                latest_version_id=target_record.latest_version_id,
+                latest_success_version_id=self._latest_success_version_id(updated_versions, target_record.latest_success_version_id),
+                created_at=target_record.created_at,
+                updated_at=now_iso(),
+            )
+            records[updated_record.record_id] = updated_record
+            self._rewrite_task_records(records.values())
+            return {
+                "action": "append_run",
+                "record": updated_record.to_dict(),
+                "version_id": baseline_version.version_id,
+                "run_record": run_record.to_dict(),
+            }
+
+        parent_version_id = baseline_version.version_id if baseline_version else None
+        new_version = SequenceVersionRecord(
+            version_id=f"version-{uuid.uuid4().hex[:12]}",
+            parent_version_id=parent_version_id,
+            change_summary=change_summary,
+            change_reason=change_reason,
+            sequence=normalized_sequence,
+            run_records=[run_record],
+            created_at=now_iso(),
+            updated_at=now_iso(),
+        )
+        updated_versions = [*target_record.versions, new_version]
+        updated_record = TaskMemoryRecord(
+            record_id=target_record.record_id,
+            user_query=user_query,
+            task_description=task_description,
+            versions=updated_versions,
+            root_version_id=target_record.root_version_id or new_version.version_id,
+            latest_version_id=new_version.version_id,
+            latest_success_version_id=(
+                new_version.version_id
+                if run_status == "success"
+                else self._latest_success_version_id(updated_versions, target_record.latest_success_version_id)
+            ),
+            created_at=target_record.created_at or now_iso(),
+            updated_at=now_iso(),
+        )
+        records[updated_record.record_id] = updated_record
+        self._rewrite_task_records(records.values())
         return {
-            "id": f"episode-{state.task_id}-{sha1(state.task_id.encode('utf-8')).hexdigest()[:10]}",
-            "task_id": state.task_id,
-            "created_at": now_iso(),
-            "goal": state.goal,
-            "status": state.status,
-            "final_answer": final_answer,
-            "observation_titles": [title for title in observation_titles if title],
-            "action_fingerprints": [fingerprint for fingerprint in action_fingerprints if fingerprint],
-            "situation_signature": situation["signature"],
-            "latency_summary_ms": {
-                "count": len(latencies),
-                "total": round(sum(latencies), 3) if latencies else 0,
-                "median": round(median(latencies), 3) if latencies else 0,
-            },
-            "failure_events": [
-                event["summary"]
-                for event in events
-                if event.get("status") == "error" or event.get("evaluation", {}).get("expectation_match") is False
-            ],
+            "action": "create_record" if created_new_record else "append_version",
+            "record": updated_record.to_dict(),
+            "version_id": new_version.version_id,
+            "run_record": run_record.to_dict(),
         }
 
-    def _update_failure_guards(self, goal: str, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        aggregated: dict[tuple[str, str], dict[str, Any]] = {}
+    def derive_sequence_from_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        steps: list[dict[str, Any]] = []
         for event in events:
             if event.get("type") != "action":
                 continue
-            fingerprint = event.get("action", {}).get("fingerprint")
-            if not fingerprint:
-                continue
-            failure_reason = None
-            evaluation = event.get("evaluation") or {}
-            if event.get("status") == "error":
-                failure_reason = (event.get("error") or {}).get("message") or event["summary"]
-            elif evaluation.get("expectation_match") is False:
-                failure_reason = "Expected active window title did not match after the action."
-            elif evaluation.get("changed") is False and evaluation.get("no_progress_streak", 0) > 0:
-                failure_reason = "The action produced no visible progress in a similar state."
-            if not failure_reason:
-                continue
-            situation = self.build_situation_signature(goal, event.get("pre_observation"))
-            key = (situation["signature"], fingerprint)
-            entry = aggregated.setdefault(
-                key,
+            action = event.get("action") or {}
+            action_name = action.get("fingerprint") or action.get("type") or "action"
+            status = event.get("primitive_status") or event.get("status") or "unknown"
+            steps.append(
                 {
-                    "id": f"guard-{sha1('|'.join(key).encode('utf-8')).hexdigest()[:12]}",
-                    "created_at": now_iso(),
-                    "updated_at": now_iso(),
-                    "situation_signature": situation["signature"],
-                    "situation_tokens": situation["tokens"],
-                    "bad_action_pattern": fingerprint,
-                    "action_fingerprint": fingerprint,
-                    "reason": failure_reason,
-                    "replacement_suggestion": "Capture a fresh observation and choose a different low-risk action before retrying.",
-                    "support_count": 0,
-                    "failure_count": 0,
-                },
-            )
-            entry["support_count"] += 1
-            entry["failure_count"] += 1
-            entry["updated_at"] = now_iso()
-
-        existing = {item["id"]: item for item in self._read_jsonl(self.failure_guards_path)}
-        updates: list[dict[str, Any]] = []
-        for record in aggregated.values():
-            current = existing.get(record["id"], {})
-            merged_support = int(current.get("support_count", 0)) + int(record["support_count"])
-            merged_failures = int(current.get("failure_count", 0)) + int(record["failure_count"])
-            merged = {
-                **current,
-                **record,
-                "support_count": merged_support,
-                "failure_count": merged_failures,
-                "failure_rate": round(merged_failures / merged_support if merged_support else 1.0, 3),
-                "confidence": round(min(0.99, 0.55 + (merged_support * 0.1)), 3),
-            }
-            existing[record["id"]] = merged
-            updates.append(merged)
-        self._rewrite_jsonl(self.failure_guards_path, existing.values())
-        return updates
-
-    def _update_skill_candidates(self, goal: str, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        traces = [
-            {
-                "fingerprint": event.get("action", {}).get("fingerprint"),
-                "duration_ms": float(event.get("duration_ms", 0)),
-                "pre_title": ((event.get("pre_observation") or {}).get("active_window") or {}).get("title"),
-                "post_title": ((event.get("post_observation") or {}).get("active_window") or {}).get("title"),
-            }
-            for event in events
-            if event.get("type") == "action" and event.get("status") == "success" and event.get("action", {}).get("fingerprint")
-        ]
-        candidates = generate_skill_candidates_from_traces(goal, traces)
-        existing = {item["id"]: item for item in self._read_jsonl(self.skills_path)}
-        updates: list[dict[str, Any]] = []
-        for candidate in candidates:
-            current = existing.get(candidate["id"], {})
-            merged_success = int(current.get("success_count", 0)) + int(candidate["success_count"])
-            merged_total = int(current.get("total_count", 0)) + int(candidate["total_count"])
-            merged_latencies = list(current.get("latency_samples", [])) + list(candidate["latency_samples"])
-            merged = {
-                **current,
-                **candidate,
-                "updated_at": now_iso(),
-                "success_count": merged_success,
-                "total_count": merged_total,
-                "median_latency_ms": round(median(merged_latencies), 3) if merged_latencies else 0.0,
-                "latency_samples": merged_latencies,
-                "status": current.get("status", candidate.get("status", "candidate")),
-            }
-            existing[candidate["id"]] = merged
-            updates.append(merged)
-        self._rewrite_jsonl(self.skills_path, existing.values())
-        return updates
-
-    def _rewrite_jsonl(self, path, records: Iterable[dict[str, Any]]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("", encoding="utf-8")
-        for record in records:
-            append_jsonl(path, record)
-
-
-def generate_skill_candidates_from_traces(goal: str, traces: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if len(traces) < 4:
-        return []
-    patterns: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
-    for size in range(2, min(5, len(traces) + 1)):
-        for index in range(0, len(traces) - size + 1):
-            window = traces[index : index + size]
-            signature = tuple(item["fingerprint"] for item in window)
-            patterns[signature].append(
-                {
-                    "pre_title": window[0].get("pre_title") or "",
-                    "post_title": window[-1].get("post_title") or "",
-                    "latency_ms": sum(item.get("duration_ms", 0.0) for item in window),
+                    "action_name": str(action_name),
+                    "status": str(status),
+                    "duration": round(float(event.get("duration_ms", 0.0)), 3),
                 }
             )
-    candidates: list[dict[str, Any]] = []
-    for action_sequence, occurrences in patterns.items():
-        if len(occurrences) < 2:
-            continue
-        pre_title = Counter(item["pre_title"] for item in occurrences if item["pre_title"]).most_common(1)
-        post_title = Counter(item["post_title"] for item in occurrences if item["post_title"]).most_common(1)
-        precondition_signature = pre_title[0][0] if pre_title else goal
-        postcondition_signature = post_title[0][0] if post_title else ""
-        latency_samples = [round(item["latency_ms"], 3) for item in occurrences]
-        sequence_slug = "-".join(step.replace(":", "-") for step in action_sequence)[:80]
-        candidates.append(
-            {
-                "id": f"skill-{sha1((precondition_signature + '|' + '|'.join(action_sequence)).encode('utf-8')).hexdigest()[:12]}",
-                "created_at": now_iso(),
-                "updated_at": now_iso(),
-                "name": f"candidate-{sequence_slug}",
-                "precondition_signature": precondition_signature,
-                "action_sequence": list(action_sequence),
-                "postcondition_signature": postcondition_signature,
-                "status": "candidate",
-                "success_count": len(occurrences),
-                "total_count": len(occurrences),
-                "median_latency_ms": round(median(latency_samples), 3),
-                "latency_samples": latency_samples,
-            }
-        )
-    candidates.sort(key=lambda item: (item["success_count"], len(item["action_sequence"])), reverse=True)
-    return candidates
+        return steps
+
+    def _rank_task_records(self, query_tokens: list[str], limit: int) -> list[dict[str, Any]]:
+        ranked: list[dict[str, Any]] = []
+        for record in self.list_task_records():
+            haystack = " ".join([record.user_query, record.task_description])
+            score = jaccard_similarity(query_tokens, tokenise(haystack))
+            if score <= 0:
+                continue
+            ranked.append(
+                {
+                    "score": round(score, 3),
+                    **record.to_dict(),
+                }
+            )
+        ranked.sort(key=lambda item: item["score"], reverse=True)
+        return ranked[:limit]
+
+    def _rewrite_task_records(self, records: Iterable[TaskMemoryRecord]) -> None:
+        self._rewrite_jsonl(self.task_records_path, [record.to_dict() for record in records])
+
+    def _normalise_sequence(
+        self,
+        sequence: list[Mapping[str, Any]] | list[SequenceStepRecord],
+    ) -> list[SequenceStepRecord]:
+        normalised: list[SequenceStepRecord] = []
+        for item in sequence:
+            if isinstance(item, SequenceStepRecord):
+                normalised.append(item)
+            else:
+                normalised.append(SequenceStepRecord.from_dict(item))
+        return normalised
+
+    def _sequence_signature(self, sequence: list[SequenceStepRecord]) -> tuple[str, ...]:
+        return tuple(step.action_name for step in sequence)
+
+    def _preferred_baseline_version(self, record: TaskMemoryRecord) -> SequenceVersionRecord | None:
+        success_version = self._find_version_by_id(record, record.latest_success_version_id)
+        if success_version:
+            return success_version
+        if record.latest_version_id:
+            return self._find_version_by_id(record, record.latest_version_id)
+        return record.versions[-1] if record.versions else None
+
+    def _find_version_by_id(self, record: TaskMemoryRecord, version_id: str | None) -> SequenceVersionRecord | None:
+        if not version_id:
+            return None
+        for version in record.versions:
+            if version.version_id == version_id:
+                return version
+        return None
+
+    def _latest_success_version_id(self, versions: list[SequenceVersionRecord], fallback: str | None = None) -> str | None:
+        for version in reversed(versions):
+            if any(run.status == "success" for run in reversed(version.run_records)):
+                return version.version_id
+        return fallback
+
+    def _new_record_id(self, user_query: str, task_description: str) -> str:
+        seed = f"{user_query}|{task_description}|{uuid.uuid4().hex}"
+        return f"taskmem-{sha1(seed.encode('utf-8')).hexdigest()[:12]}"

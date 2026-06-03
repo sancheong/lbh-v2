@@ -32,11 +32,13 @@ Navigate to ChatGPT:
 python -m lbh.cli batch --task <task-id> --actions examples\navigate_chatgpt_batch.json
 ```
 
+The navigation batch should include an explicit expectation so that a search-results detour is reported as `semantic_failure` instead of `success`.
+
 Ask the question:
 
 - Re-observe after navigation.
 - Click the composer with `resized_image` coordinates if it is clearly visible.
-- Use `type_text` or clipboard paste.
+- Prefer `clipboard_set` + `ctrl+v` for prompts instead of `type_text`.
 - Re-observe before sending if the state is still uncertain.
 
 Wait for the answer without repeated LLM checks:

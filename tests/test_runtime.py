@@ -1,5 +1,3 @@
-import json
-
 from PIL import Image
 
 from lbh.memory import MemoryStore
@@ -123,24 +121,10 @@ def test_runtime_does_not_attach_memory_context_automatically(tmp_path):
     assert observed["relevant_memory"] == {}
 
 
-def test_runtime_ignores_failure_guards_when_memory_reference_is_disabled(tmp_path):
+def test_runtime_memory_guards_are_noop_under_task_record_model(tmp_path):
     runtime = _runtime(tmp_path)
     runtime.create_task("Open Chrome.", task_id="task-1")
     runtime.observe("task-1")
-    guard = {
-        "id": "guard-1",
-        "situation_signature": "Open Chrome. | Desktop",
-        "situation_tokens": ["open", "chrome", "desktop"],
-        "action_fingerprint": "press:enter",
-        "bad_action_pattern": "press:enter",
-        "reason": "Block enter.",
-        "replacement_suggestion": "Do something else.",
-        "support_count": 5,
-        "failure_count": 5,
-        "failure_rate": 1.0,
-        "confidence": 0.95,
-    }
-    runtime.memory_store.failure_guards_path.write_text(json.dumps(guard) + "\n", encoding="utf-8")
 
     result = runtime.execute_action(
         "task-1",
@@ -150,3 +134,115 @@ def test_runtime_ignores_failure_guards_when_memory_reference_is_disabled(tmp_pa
 
     assert result["status"] == "success"
     assert result["guard_matches"] == []
+
+
+def test_batch_expectation_failure_is_semantic_failure(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.adapter.titles = ["Chrome", "Google Search - Chrome", "Google Search - Chrome"]
+    runtime.adapter.images = [Image.new("RGB", (1920, 1080), "white"), Image.new("RGB", (1920, 1080), "black"), Image.new("RGB", (1920, 1080), "black")]
+    runtime.create_task("Open ChatGPT.", task_id="task-1")
+    runtime.observe("task-1")
+
+    result = runtime.execute_batch(
+        "task-1",
+        {
+            "observe_after": True,
+            "expectation": {
+                "title_contains_any": ["ChatGPT"],
+                "title_not_contains_any": ["Search"],
+                "require_changed": True,
+            },
+            "actions": [
+                {"type": "press", "key": "enter", "reason": "Navigate"},
+            ],
+        },
+    )
+
+    assert result["primitive_results"][0]["status"] == "success"
+    assert result["status"] == "semantic_failure"
+
+
+def test_url_direct_typing_emits_warning(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.create_task("Open ChatGPT.", task_id="task-1")
+    runtime.observe("task-1")
+
+    result = runtime.execute_batch(
+        "task-1",
+        {
+            "observe_after": False,
+            "actions": [
+                {"type": "type_text", "text": "https://chatgpt.com", "reason": "Type URL directly"},
+                {"type": "press", "key": "enter", "reason": "Navigate"},
+            ],
+        },
+    )
+
+    assert any("clipboard_set:url" in warning for warning in result["warnings"])
+
+
+def test_benchmark_report_summarizes_task(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.create_task("Open Chrome.", task_id="task-1")
+    runtime.observe("task-1")
+    runtime.execute_action(
+        "task-1",
+        {"type": "clipboard_get", "reason": "Read clipboard."},
+        observe_after=False,
+    )
+    runtime.finish("task-1", "done")
+
+    report = runtime.benchmark_report("task-1")
+
+    assert report["status"] == "success"
+    assert report["observation_count"] >= 1
+    assert report["primitive_action_count"] >= 1
+
+
+def test_runtime_memory_commit_derives_raw_sequence(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.create_task("Open ChatGPT.", task_id="task-1")
+    runtime.observe("task-1")
+    runtime.execute_batch(
+        "task-1",
+        {
+            "observe_after": False,
+            "actions": [
+                {"type": "hotkey", "keys": ["ctrl", "l"], "reason": "Focus address bar"},
+                {"type": "clipboard_set", "text": "https://chatgpt.com", "reason": "Prepare URL"},
+            ],
+        },
+    )
+
+    result = runtime.memory_commit(
+        "task-1",
+        {
+            "task_description": "Open Chrome and navigate to ChatGPT.",
+            "change_summary": "Initial raw capture.",
+            "change_reason": "First run.",
+            "run_note": "Recorded the first raw sequence.",
+            "run_status": "success",
+        },
+    )
+
+    record = result["memory_commit"]["record"]
+    assert result["memory_commit"]["action"] == "create_record"
+    assert record["versions"][0]["sequence"][0]["action_name"] == "hotkey:ctrl+l"
+
+
+def test_runtime_memory_search_returns_task_records(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.memory_store.commit_task_record(
+        user_query="Open Chrome and go to ChatGPT.",
+        task_description="Open Chrome and navigate to ChatGPT.",
+        sequence=[{"action_name": "open_chrome", "status": "success", "duration": 5}],
+        run_status="success",
+        run_note="Initial run.",
+        elapsed_time=100.0,
+    )
+
+    runtime.create_task("Open Chrome and go to ChatGPT.", task_id="task-1")
+    result = runtime.memory_search("task-1")
+
+    assert result["memory"]["task_records"]
+    assert "ChatGPT" in result["memory"]["task_records"][0]["task_description"]

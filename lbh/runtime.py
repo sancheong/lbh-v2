@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime
 import time
 import uuid
 from typing import Any
 
 from .capture import CaptureService
 from .common import DEFAULT_JPEG_QUALITY, DEFAULT_MODEL_MAX_WIDTH
-from .contracts import ActionBatch, ActionSpec, CoordinateSpace, CoordinateTransform, LocatorResult, TaskState
+from .contracts import ActionBatch, ActionSpec, CoordinateSpace, CoordinateTransform, Expectation, LocatorResult, TaskState, looks_like_url
 from .errors import TaskStateError
-from .evaluator import StabilityWaiter, evaluate_observation_progress
+from .evaluator import StabilityWaiter, active_window_title, evaluate_expectation, evaluate_observation_progress
 from .locator import build_locator_prompt, parse_locator_response
 from .memory import MemoryStore
 from .platform import DesktopAdapter, PyAutoGUIDesktopAdapter
@@ -24,11 +25,13 @@ class LBHRuntime:
         task_store: TaskStore | None = None,
         memory_store: MemoryStore | None = None,
         memory_reference_enabled: bool = False,
+        memory_mode: str = "off",
     ):
         self.adapter = adapter or PyAutoGUIDesktopAdapter()
         self.task_store = task_store or TaskStore()
         self.memory_store = memory_store or MemoryStore()
-        self.memory_reference_enabled = memory_reference_enabled
+        self.memory_mode = memory_mode
+        self.memory_reference_enabled = memory_reference_enabled or memory_mode != "off"
         self.capture_service = CaptureService(self.adapter)
         self.waiter = StabilityWaiter(self.capture_service)
 
@@ -88,12 +91,13 @@ class LBHRuntime:
         self._ensure_mutable_task(state)
         action = action_payload if isinstance(action_payload, ActionSpec) else ActionSpec.from_dict(action_payload)
         pre_observation = state.latest_observation
+        warnings = self._collect_action_warnings(action)
         guard_matches = self._automatic_guard_matches(
             goal=state.goal,
             observation=pre_observation,
             action_fingerprints=[action.fingerprint()],
         )
-        if not ignore_guards and any(match["decision"] == "block" for match in guard_matches):
+        if self._should_block_on_guards(guard_matches, ignore_guards=ignore_guards):
             self.task_store.append_event(
                 state.task_dir,
                 "memory_guard",
@@ -101,66 +105,98 @@ class LBHRuntime:
                 status="blocked",
                 action=action.to_dict(),
                 guard_matches=guard_matches,
+                warnings=warnings,
             )
-            return {"status": "blocked_by_failure_guard", "action": action.to_dict(), "guard_matches": guard_matches}
+            return {
+                "status": "blocked",
+                "primitive_status": "not_run",
+                "action": action.to_dict(),
+                "guard_matches": guard_matches,
+                "warnings": warnings,
+            }
 
         transform = self._transform_for_action(state, action)
         started = time.perf_counter()
-        status = "success"
+        primitive_status = "success"
         result = None
         error = None
         try:
             result = self._execute_primitive(action, transform)
         except Exception as exc:
-            status = "error"
+            primitive_status = "error"
             error = {"error_type": exc.__class__.__name__, "message": str(exc)}
         duration_ms = round((time.perf_counter() - started) * 1000, 3)
 
         post_observation = None
         evaluation = None
         relevant_memory = state.memory_context
-        if status == "success" and observe_after:
+        if primitive_status == "success" and observe_after:
             observation_result = self._record_observation(state, expectation=action.expectation, label="post-action")
             post_observation = observation_result["observation"]
             evaluation = observation_result["evaluation"]
             relevant_memory = observation_result["relevant_memory"]
             state = self.task_store.load_state(task)
 
-        event_action = {**action.to_dict(), "fingerprint": action.fingerprint()}
+        primitive_payload = {
+            "status": primitive_status,
+            "action": {**action.to_dict(), "fingerprint": action.fingerprint()},
+            "result": result,
+            "error": error,
+            "duration_ms": duration_ms,
+        }
+        semantic_evaluation = self._evaluate_action_semantics(
+            action=action,
+            pre_observation=pre_observation,
+            post_observation=post_observation,
+            primitive_payload=primitive_payload,
+            observation_evaluation=evaluation,
+        )
+        status = "primitive_error" if primitive_status != "success" else semantic_evaluation["status"]
+
+        event_action = primitive_payload["action"]
         self.task_store.append_event(
             state.task_dir,
             "action",
             f"Executed {action.type}.",
             status=status,
+            primitive_status=primitive_status,
             duration_ms=duration_ms,
             action=event_action,
             result=result,
             error=error,
             guard_matches=guard_matches,
+            warnings=warnings,
             pre_observation=pre_observation,
             post_observation=post_observation,
             evaluation=evaluation,
+            semantic_evaluation=semantic_evaluation,
             coordinate_transform=transform.to_dict() if transform else None,
         )
         state.latest_action = {
             "status": status,
+            "primitive_status": primitive_status,
             "action": event_action,
             "result": result,
             "error": error,
             "duration_ms": duration_ms,
             "observed_after": observe_after,
+            "warnings": warnings,
+            "semantic_evaluation": semantic_evaluation,
         }
         state.latency_metrics["last_action_ms"] = duration_ms
         self.task_store.save_state(state)
         return {
             "status": status,
+            "primitive_status": primitive_status,
             "action": event_action,
             "result": result,
             "error": error,
             "duration_ms": duration_ms,
             "guard_matches": guard_matches,
+            "warnings": warnings,
             "post_observation": post_observation,
             "evaluation": evaluation,
+            "semantic_evaluation": semantic_evaluation,
             "relevant_memory": relevant_memory,
         }
 
@@ -175,12 +211,14 @@ class LBHRuntime:
         self._ensure_mutable_task(state)
         batch = batch_payload if isinstance(batch_payload, ActionBatch) else ActionBatch.from_payload(batch_payload)
         pre_observation = state.latest_observation
+        sequence_fingerprint = self._batch_sequence_fingerprint(batch)
+        warnings = self._collect_batch_warnings(batch)
         guard_matches = self._automatic_guard_matches(
             goal=state.goal,
             observation=pre_observation,
-            action_fingerprints=[action.fingerprint() for action in batch.actions],
+            action_fingerprints=[action.fingerprint() for action in batch.actions] + [sequence_fingerprint],
         )
-        if not ignore_guards and any(match["decision"] == "block" for match in guard_matches):
+        if self._should_block_on_guards(guard_matches, ignore_guards=ignore_guards):
             self.task_store.append_event(
                 state.task_dir,
                 "memory_guard",
@@ -188,8 +226,14 @@ class LBHRuntime:
                 status="blocked",
                 batch=batch.to_dict(),
                 guard_matches=guard_matches,
+                warnings=warnings,
             )
-            return {"status": "blocked_by_failure_guard", "batch": batch.to_dict(), "guard_matches": guard_matches}
+            return {
+                "status": "blocked",
+                "batch": batch.to_dict(),
+                "guard_matches": guard_matches,
+                "warnings": warnings,
+            }
 
         transform = self._transform_for_batch(state, batch)
         batch_id = uuid.uuid4().hex
@@ -197,46 +241,51 @@ class LBHRuntime:
         primitive_results: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
         completed = True
+        timed_out = False
         for index, action in enumerate(batch.actions):
             elapsed = time.perf_counter() - started
             if batch.max_duration_seconds and elapsed > batch.max_duration_seconds:
                 errors.append({"error_type": "TimeoutError", "message": f"Batch exceeded max_duration_seconds={batch.max_duration_seconds}."})
                 completed = False
+                timed_out = True
                 break
             action_started = time.perf_counter()
-            status = "success"
+            primitive_status = "success"
             result = None
             error = None
             try:
                 result = self._execute_primitive(action, transform)
             except Exception as exc:
-                status = "error"
+                primitive_status = "error"
                 error = {"error_type": exc.__class__.__name__, "message": str(exc)}
                 errors.append(error)
             duration_ms = round((time.perf_counter() - action_started) * 1000, 3)
             primitive_payload = {
-                "status": status,
+                "status": primitive_status,
                 "action": {**action.to_dict(), "fingerprint": action.fingerprint()},
                 "result": result,
                 "error": error,
                 "duration_ms": duration_ms,
                 "index": index,
+                "warnings": self._collect_action_warnings(action),
             }
             primitive_results.append(primitive_payload)
             self.task_store.append_event(
                 state.task_dir,
                 "action",
                 f"Executed {action.type} in batch.",
-                status=status,
+                status="primitive_error" if primitive_status != "success" else "success",
+                primitive_status=primitive_status,
                 duration_ms=duration_ms,
                 batch_id=batch_id,
                 action=primitive_payload["action"],
                 result=result,
                 error=error,
+                warnings=primitive_payload["warnings"],
                 pre_observation=pre_observation if index == 0 else None,
                 coordinate_transform=transform.to_dict() if transform else None,
             )
-            if status == "error" and batch.stop_on_error:
+            if primitive_status == "error" and batch.stop_on_error:
                 completed = False
                 break
 
@@ -251,44 +300,62 @@ class LBHRuntime:
             relevant_memory = observation_result["relevant_memory"]
             state = self.task_store.load_state(task)
 
-        summary_status = "success" if completed and not errors else "partial"
+        semantic_evaluation = self._evaluate_batch_semantics(
+            batch=batch,
+            pre_observation=pre_observation,
+            post_observation=post_observation,
+            primitive_results=primitive_results,
+            observation_evaluation=evaluation,
+            timed_out=timed_out,
+            errors=errors,
+        )
+        summary_status = semantic_evaluation["status"]
         self.task_store.append_event(
             state.task_dir,
             "batch",
             f"Executed batch with {len(batch.actions)} primitive actions.",
             status=summary_status,
+            primitive_status=semantic_evaluation["primitive_status"],
             duration_ms=total_duration_ms,
             batch_id=batch_id,
             batch=batch.to_dict(),
             primitive_results=primitive_results,
             errors=errors,
             completed=completed,
+            warnings=warnings,
             guard_matches=guard_matches,
             post_observation=post_observation,
             evaluation=evaluation,
+            semantic_evaluation=semantic_evaluation,
         )
         state.latest_batch = {
             "status": summary_status,
+            "primitive_status": semantic_evaluation["primitive_status"],
             "batch": batch.to_dict(),
             "duration_ms": total_duration_ms,
             "completed": completed,
             "errors": errors,
             "observe_after": batch.observe_after,
+            "warnings": warnings,
+            "semantic_evaluation": semantic_evaluation,
         }
         state.latency_metrics["last_batch_ms"] = total_duration_ms
         self.task_store.save_state(state)
         return {
             "status": summary_status,
+            "primitive_status": semantic_evaluation["primitive_status"],
             "batch_id": batch_id,
             "batch": batch.to_dict(),
             "primitive_results": primitive_results,
             "duration_ms": total_duration_ms,
             "completed": completed,
             "errors": errors,
+            "warnings": warnings,
             "guard_matches": guard_matches,
             "final_observation_path": post_observation.get("screenshot_path") if post_observation else None,
             "post_observation": post_observation,
             "evaluation": evaluation,
+            "semantic_evaluation": semantic_evaluation,
             "relevant_memory": relevant_memory,
         }
 
@@ -298,16 +365,22 @@ class LBHRuntime:
         state.status = "completed"
         state.result_answer = answer
         self.task_store.save_state(state)
-        events = self.task_store.read_events(task)
-        memory_updates = self.memory_store.consolidate_task(state=state, events=events, final_answer=answer)
-        for update_type, payload in memory_updates.items():
-            if isinstance(payload, list):
-                for item in payload:
-                    self.task_store.append_memory_update(task, {"timestamp": time.time(), "type": update_type, "record": item})
-            elif payload:
-                self.task_store.append_memory_update(task, {"timestamp": time.time(), "type": update_type, "record": payload})
-        self.task_store.append_event(state.task_dir, "finish", "Finished task.", status="success", answer=answer, result_path=result_path)
-        return {"status": "success", "task": state.to_dict(), "result_path": result_path, "memory_updates": memory_updates}
+        self.task_store.append_event(
+            state.task_dir,
+            "finish",
+            "Finished task.",
+            status="success",
+            answer=answer,
+            result_path=result_path,
+            duration_ms=0.0,
+        )
+        return {
+            "status": "success",
+            "task": state.to_dict(),
+            "result_path": result_path,
+            "memory_updates": {},
+            "memory_consolidation_ms": 0.0,
+        }
 
     def suspend(
         self,
@@ -362,6 +435,43 @@ class LBHRuntime:
         self.task_store.append_event(state.task_dir, "memory_search", "Searched actionable memory.", status="success", query=query, results=memory)
         return {"status": "success", "memory": memory}
 
+    def memory_commit(self, task: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+        state = self.task_store.load_state(task)
+        events = self.task_store.read_events(task)
+        sequence = payload.get("sequence") or self.memory_store.derive_sequence_from_events(events)
+        commit_result = self.memory_store.commit_task_record(
+            user_query=str(payload.get("user_query") or state.goal),
+            task_description=str(payload.get("task_description") or state.goal),
+            sequence=sequence,
+            run_status=str(payload.get("run_status") or "success"),
+            run_note=str(payload.get("run_note") or ""),
+            elapsed_time=float(payload.get("elapsed_time") or self._events_wall_clock_ms(events)),
+            change_summary=str(payload.get("change_summary") or ""),
+            change_reason=str(payload.get("change_reason") or ""),
+            record_id=payload.get("record_id"),
+        )
+        self.task_store.append_memory_update(
+            task,
+            {
+                "timestamp": time.time(),
+                "type": "task_record",
+                "record": commit_result["record"],
+                "action": commit_result["action"],
+                "version_id": commit_result.get("version_id"),
+                "run_record": commit_result.get("run_record"),
+            },
+        )
+        self.task_store.append_event(
+            state.task_dir,
+            "memory_commit",
+            "Committed passive task-record memory.",
+            status="success",
+            memory_commit=commit_result,
+        )
+        state.memory_context = self.memory_store.search(goal=state.goal, observation=state.latest_observation, limit=5)
+        self.task_store.save_state(state)
+        return {"status": "success", "memory_commit": commit_result}
+
     def wait_stable(
         self,
         task: str | Path,
@@ -401,6 +511,63 @@ class LBHRuntime:
         self.task_store.save_state(state)
         self.task_store.append_event(state.task_dir, "wait_stable", "Waited for the screen to stabilize.", status=wait_result["status"], duration_ms=duration_ms, wait_result=wait_result, evaluation=evaluation)
         return {"status": wait_result["status"], "wait_result": wait_result, "evaluation": evaluation, "relevant_memory": state.memory_context}
+
+    def benchmark_report(self, task: str | Path, *, top_n: int = 5) -> dict[str, Any]:
+        state = self.task_store.load_state(task)
+        events = self.task_store.read_events(task)
+        observation_events = [event for event in events if event.get("type") == "observation"]
+        action_events = [event for event in events if event.get("type") == "action"]
+        batch_events = [event for event in events if event.get("type") == "batch"]
+        failed_events = [
+            event for event in events if event.get("status") in {"semantic_failure", "primitive_error", "partial_failure", "timeout", "blocked", "error"}
+        ]
+        total_wall_clock_ms = self._events_wall_clock_ms(events)
+        report = {
+            "status": "success",
+            "task_id": state.task_id,
+            "task_status": state.status,
+            "total_task_wall_clock_ms": total_wall_clock_ms,
+            "observation_count": len(observation_events),
+            "total_observation_time_ms": round(sum(float(event.get("duration_ms", 0.0)) for event in observation_events), 3),
+            "primitive_action_count": len(action_events),
+            "total_action_time_ms": round(sum(float(event.get("duration_ms", 0.0)) for event in action_events), 3),
+            "batch_count": len(batch_events),
+            "total_batch_time_ms": round(sum(float(event.get("duration_ms", 0.0)) for event in batch_events), 3),
+            "decision_points_approx": len(observation_events),
+            "failed_event_count": len(failed_events),
+            "failed_events": [
+                {
+                    "type": event.get("type"),
+                    "status": event.get("status"),
+                    "summary": event.get("summary"),
+                }
+                for event in failed_events
+            ],
+            "recovery_count": self._count_recoveries(events),
+            "memory_consolidation_ms": float(state.latency_metrics.get("memory_consolidation_ms", 0.0)),
+            "screenshot_sizes": [
+                {
+                    "path": event.get("observation", {}).get("screenshot_path"),
+                    "bytes": event.get("observation", {}).get("image_byte_count"),
+                }
+                for event in observation_events
+            ],
+            "most_expensive_events": sorted(
+                [
+                    {
+                        "type": event.get("type"),
+                        "status": event.get("status"),
+                        "summary": event.get("summary"),
+                        "duration_ms": float(event.get("duration_ms", 0.0)),
+                    }
+                    for event in events
+                    if isinstance(event.get("duration_ms"), (int, float))
+                ],
+                key=lambda item: item["duration_ms"],
+                reverse=True,
+            )[:top_n],
+        }
+        return report
 
     def benchmark(
         self,
@@ -492,22 +659,181 @@ class LBHRuntime:
         return {"status": "success", "locator": payload}
 
     def skills(self, task: str | Path | None = None, *, consolidate: bool = False) -> dict[str, Any]:
-        if consolidate:
-            task_path = task if task is not None else None
-            if task_path is None:
-                return {"status": "success", "message": "Skill candidates are consolidated automatically on finish."}
-            state = self.task_store.load_state(task_path)
-            events = self.task_store.read_events(task_path)
-            created = self.memory_store.consolidate_task(state=state, events=events, final_answer=state.result_answer or "In-progress consolidation")["skills"]
-            return {"status": "success", "skills": created}
-        if task is None:
-            return {"status": "success", "skills": self.memory_store._read_jsonl(self.memory_store.skills_path)}
-        state = self.task_store.load_state(task)
-        skills = self.memory_store.search(goal=state.goal, observation=state.latest_observation)["skills"]
-        return {"status": "success", "skills": skills}
+        return {"status": "success", "skills": [], "message": "Skill memories were retired in favor of passive task records."}
 
     def paths_payload(self, task: str | Path) -> dict[str, str]:
         return {key: str(path.resolve()) for key, path in self.task_store.paths_for(task).items()}
+
+    def _collect_action_warnings(self, action: ActionSpec) -> list[str]:
+        warnings: list[str] = []
+        if action.type == "type_text" and looks_like_url(action.text):
+            warnings.append("Direct URL typing is fragile. Prefer clipboard_set + ctrl+v for URLs.")
+        if action.type == "type_text" and action.text and len(action.text) >= 40:
+            warnings.append("Long text entry should usually use clipboard_set + ctrl+v instead of type_text.")
+        return warnings
+
+    def _collect_batch_warnings(self, batch: ActionBatch) -> list[str]:
+        warnings: list[str] = []
+        action_fingerprints = [action.fingerprint() for action in batch.actions]
+        if any(fingerprint == "type_text:url" for fingerprint in action_fingerprints) and any(fingerprint == "press:enter" for fingerprint in action_fingerprints):
+            warnings.append("This batch types a URL directly and submits it. Prefer clipboard_set:url + hotkey:ctrl+v.")
+        for action in batch.actions:
+            warnings.extend(self._collect_action_warnings(action))
+        return sorted(set(warnings))
+
+    def _batch_sequence_fingerprint(self, batch: ActionBatch) -> str:
+        return "sequence:" + " -> ".join(action.fingerprint() for action in batch.actions)
+
+    def _should_block_on_guards(self, guard_matches: list[dict[str, Any]], *, ignore_guards: bool) -> bool:
+        if ignore_guards or self.memory_mode != "block":
+            return False
+        return any(match["decision"] == "block" for match in guard_matches)
+
+    def _effective_expectation(
+        self,
+        *,
+        expectation: Expectation | None,
+        require_changed: bool | None = None,
+        allow_no_visual_change: bool | None = None,
+        visual_change_expected: bool | None = None,
+    ) -> Expectation | None:
+        payload = dict(expectation.to_dict()) if expectation else {}
+        if require_changed is not None and "require_changed" not in payload:
+            payload["require_changed"] = require_changed
+        if allow_no_visual_change is not None and "allow_no_visual_change" not in payload:
+            payload["allow_no_visual_change"] = allow_no_visual_change
+        if visual_change_expected is not None and "visual_change_expected" not in payload:
+            payload["visual_change_expected"] = visual_change_expected
+        return Expectation.from_payload(payload)
+
+    def _evaluate_action_semantics(
+        self,
+        *,
+        action: ActionSpec,
+        pre_observation: dict[str, Any] | None,
+        post_observation: dict[str, Any] | None,
+        primitive_payload: dict[str, Any],
+        observation_evaluation: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        expectation = action.expectation
+        if expectation is None:
+            return {
+                "status": "success",
+                "matched": True,
+                "reason": "No explicit semantic expectation for action.",
+                "checks": [],
+                "action_category": action.action_category,
+                "visual_change_expected": action.visual_change_expected_default,
+                "allow_no_visual_change": action.is_non_visual_action or bool(action.allow_no_visual_change),
+                "changed": (observation_evaluation or {}).get("changed"),
+            }
+        expectation = self._effective_expectation(
+            expectation=expectation,
+            allow_no_visual_change=action.is_non_visual_action or action.allow_no_visual_change,
+            visual_change_expected=action.visual_change_expected_default,
+        )
+        clipboard_result = primitive_payload["result"] if action.type == "clipboard_get" else None
+        evaluation = evaluate_expectation(expectation, pre_observation, post_observation, [primitive_payload], clipboard_result)
+        evaluation["action_category"] = action.action_category
+        evaluation["visual_change_expected"] = action.visual_change_expected_default
+        evaluation["allow_no_visual_change"] = action.is_non_visual_action or bool(action.allow_no_visual_change)
+        return evaluation
+
+    def _evaluate_batch_semantics(
+        self,
+        *,
+        batch: ActionBatch,
+        pre_observation: dict[str, Any] | None,
+        post_observation: dict[str, Any] | None,
+        primitive_results: list[dict[str, Any]],
+        observation_evaluation: dict[str, Any] | None,
+        timed_out: bool,
+        errors: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        primitive_error_count = sum(1 for item in primitive_results if item["status"] != "success")
+        primitive_status = "success" if primitive_error_count == 0 and not timed_out else "error"
+        clipboard_result = next(
+            (item.get("result") for item in reversed(primitive_results) if (item.get("action") or {}).get("type") == "clipboard_get"),
+            None,
+        )
+        explicit_expectation = batch.postcondition or batch.expectation
+        visual_actions = [action for action in batch.actions if not action.is_non_visual_action]
+        allow_no_visual_change = (
+            batch.allow_no_visual_change
+            if batch.allow_no_visual_change is not None
+            else (explicit_expectation.allow_no_visual_change if explicit_expectation else None)
+        )
+        visual_change_expected = (
+            batch.visual_change_expected
+            if batch.visual_change_expected is not None
+            else (explicit_expectation.visual_change_expected if explicit_expectation else None)
+        )
+        if visual_change_expected is None:
+            visual_change_expected = bool(visual_actions)
+        if allow_no_visual_change is None:
+            allow_no_visual_change = not visual_actions
+        expectation = self._effective_expectation(
+            expectation=explicit_expectation,
+            require_changed=True if visual_change_expected and not allow_no_visual_change else None,
+            allow_no_visual_change=allow_no_visual_change,
+            visual_change_expected=visual_change_expected,
+        )
+        expectation_result = evaluate_expectation(expectation, pre_observation, post_observation, primitive_results, clipboard_result)
+        changed = (observation_evaluation or {}).get("changed")
+        semantic_failure_reasons: list[str] = []
+        if expectation_result["status"] == "semantic_failure":
+            semantic_failure_reasons.append(expectation_result["reason"])
+        if not explicit_expectation and visual_change_expected and not allow_no_visual_change and post_observation and changed is False:
+            semantic_failure_reasons.append("Batch expected visible progress but the final observation did not change.")
+        post_title = active_window_title(post_observation)
+        if any(action.fingerprint() == "type_text:url" for action in batch.actions) and "search" in post_title.lower():
+            semantic_failure_reasons.append("Direct URL typing appears to have produced a search page instead of target navigation.")
+
+        if timed_out:
+            status = "timeout"
+        elif primitive_error_count and primitive_results and len(primitive_results) > primitive_error_count:
+            status = "partial_failure"
+        elif primitive_error_count:
+            status = "primitive_error"
+        elif semantic_failure_reasons:
+            status = "semantic_failure"
+        else:
+            status = "success"
+        return {
+            "status": status,
+            "primitive_status": primitive_status,
+            "matched": status == "success",
+            "reason": " | ".join(semantic_failure_reasons) if semantic_failure_reasons else expectation_result["reason"],
+            "checks": expectation_result.get("checks", []),
+            "expectation_result": expectation_result,
+            "changed": changed,
+            "visual_change_expected": visual_change_expected,
+            "allow_no_visual_change": allow_no_visual_change,
+            "post_title": post_title,
+            "sequence_fingerprint": self._batch_sequence_fingerprint(batch),
+            "primitive_error_count": primitive_error_count,
+            "errors": errors,
+        }
+
+    def _events_wall_clock_ms(self, events: list[dict[str, Any]]) -> float:
+        timestamps = [event.get("timestamp") for event in events if event.get("timestamp")]
+        if len(timestamps) < 2:
+            return 0.0
+        started = datetime.fromisoformat(str(timestamps[0]))
+        ended = datetime.fromisoformat(str(timestamps[-1]))
+        return round((ended - started).total_seconds() * 1000.0, 3)
+
+    def _count_recoveries(self, events: list[dict[str, Any]]) -> int:
+        seen_failure = False
+        recoveries = 0
+        for event in events:
+            status = event.get("status")
+            if status in {"semantic_failure", "primitive_error", "partial_failure", "timeout", "blocked", "error"}:
+                seen_failure = True
+            elif seen_failure and status == "success":
+                recoveries += 1
+                seen_failure = False
+        return recoveries
 
     def _automatic_memory_context(
         self,
