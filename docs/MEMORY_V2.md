@@ -20,6 +20,7 @@ Each task record contains:
 - `root_version_id`
 - `latest_version_id`
 - `latest_success_version_id`
+- `preferred_success_version_id`
 
 Each version contains:
 
@@ -45,7 +46,7 @@ Each run record contains:
 1. Run `memory-search` at task start.
 2. Read the returned task cards.
 3. Select a record with `memory-select` when the task matches.
-4. Use `latest_success_version` as the primary draft when available.
+4. Use `preferred_success_version` as the primary draft when available.
 5. Fall back to `baseline_version` when no successful version exists yet.
 6. Execute and adapt the sequence as needed.
 7. Commit the result with `memory-commit`.
@@ -61,6 +62,7 @@ When providing timing fields to `memory-commit`, record them in seconds rather t
 - Failed executions stay in run history even when the attempted sequence diverged from the latest successful draft.
 - The direct parent for a new version is the latest successful version.
 - The root version is preserved even if it was a failure.
+- Among successful versions, draft preference is based on sequence quality first and wall-clock time only as a weak secondary signal.
 
 ## Semantic failures
 

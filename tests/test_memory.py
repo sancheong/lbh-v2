@@ -221,6 +221,65 @@ def test_task_card_includes_latest_success_version_and_recent_failures(tmp_path)
     assert card["recent_failures"][0]["note"] == "Failure 3"
 
 
+def test_task_card_prefers_higher_quality_success_version_over_latest(tmp_path):
+    store = MemoryStore(memory_dir=tmp_path / "memories")
+    created = store.commit_task_record(
+        user_query="Open Chrome and go to ChatGPT.",
+        task_description="Open Chrome, navigate to ChatGPT, and ask a question.",
+        sequence=[
+            {"action_name": "hotkey:ctrl+l", "status": "success", "duration": 0.4},
+            {"action_name": "clipboard_set:url", "status": "success", "duration": 0.01},
+            {"action_name": "hotkey:ctrl+v", "status": "success", "duration": 0.1},
+            {"action_name": "press:enter", "status": "success", "duration": 0.1},
+            {"action_name": "wait:3s", "status": "success", "duration": 3.0},
+            {"action_name": "clipboard_set", "status": "success", "duration": 0.01},
+            {"action_name": "hotkey:ctrl+v", "status": "success", "duration": 0.1},
+            {"action_name": "press:enter", "status": "success", "duration": 0.1},
+        ],
+        run_status="success",
+        run_note="Compact success.",
+        elapsed_time=180.0,
+        change_summary="Compact success path.",
+        change_reason="Initial stable draft.",
+    )
+
+    store.commit_task_record(
+        record_id=created["record"]["record_id"],
+        user_query="Open Chrome and go to ChatGPT.",
+        task_description="Open Chrome, navigate to ChatGPT, and ask a question.",
+        sequence=[
+            {"action_name": "window_activate:chrome", "status": "success", "duration": 0.2},
+            {"action_name": "hotkey:ctrl+l", "status": "success", "duration": 0.4},
+            {"action_name": "clipboard_set:url", "status": "success", "duration": 0.01},
+            {"action_name": "hotkey:ctrl+v", "status": "success", "duration": 0.1},
+            {"action_name": "press:enter", "status": "success", "duration": 0.1},
+            {"action_name": "wait:3s", "status": "success", "duration": 3.0},
+            {"action_name": "click:left:resized_image", "status": "success", "duration": 0.5},
+            {"action_name": "hotkey:ctrl+l", "status": "success", "duration": 0.4},
+            {"action_name": "clipboard_set:url", "status": "success", "duration": 0.01},
+            {"action_name": "hotkey:ctrl+v", "status": "success", "duration": 0.1},
+            {"action_name": "press:enter", "status": "success", "duration": 0.1},
+            {"action_name": "wait:3s", "status": "success", "duration": 3.0},
+            {"action_name": "hotkey:ctrl+a", "status": "success", "duration": 0.4},
+            {"action_name": "hotkey:ctrl+c", "status": "success", "duration": 0.1},
+        ],
+        run_status="success",
+        run_note="Latest but noisier success.",
+        elapsed_time=150.0,
+        change_summary="Noisier success path.",
+        change_reason="Recorded a later but more repetitive path.",
+    )
+
+    result = store.search(goal="Open Chrome")
+
+    card = result["task_cards"][0]
+    assert card["latest_success_version"] is not None
+    assert card["preferred_success_version"] is not None
+    assert card["latest_success_version"]["change_summary"] == "Noisier success path."
+    assert card["preferred_success_version"]["change_summary"] == "Compact success path."
+    assert card["baseline_version"]["change_summary"] == "Compact success path."
+
+
 def test_get_task_record_view_returns_full_version_history(tmp_path):
     store = MemoryStore(memory_dir=tmp_path / "memories")
     created = store.commit_task_record(
@@ -237,6 +296,7 @@ def test_get_task_record_view_returns_full_version_history(tmp_path):
     record = store.get_task_record_view(created["record"]["record_id"])
 
     assert record is not None
+    assert record["preferred_success_version_id"] == record["latest_success_version_id"]
     assert record["versions"][0]["change_summary"] == "Initial sequence."
     assert record["versions"][0]["run_records"][0]["note"] == "Initial run."
 

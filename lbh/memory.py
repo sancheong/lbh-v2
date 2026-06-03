@@ -10,6 +10,8 @@ from .contracts import RunRecord, SequenceStepRecord, SequenceVersionRecord, Tas
 RECENT_FAILURE_LIMIT = 3
 LEGACY_STEP_DURATION_MS_THRESHOLD = 100.0
 LEGACY_RUN_ELAPSED_MS_THRESHOLD = 1000.0
+URL_NAVIGATION_PATTERN = ("hotkey:ctrl+l", "clipboard_set:url", "hotkey:ctrl+v", "press:enter")
+FALLBACK_ACTIONS = {"hotkey:ctrl+a", "hotkey:ctrl+c", "press:end", "press:pagedown"}
 
 
 def jaccard_similarity(left: Iterable[str], right: Iterable[str]) -> float:
@@ -314,12 +316,22 @@ class MemoryStore:
         return tuple(step.action_name for step in sequence)
 
     def _preferred_baseline_version(self, record: TaskMemoryRecord) -> SequenceVersionRecord | None:
-        success_version = self._find_version_by_id(record, record.latest_success_version_id)
-        if success_version:
-            return success_version
+        preferred_success_version = self._preferred_success_version(record)
+        if preferred_success_version:
+            return preferred_success_version
         if record.latest_version_id:
             return self._find_version_by_id(record, record.latest_version_id)
         return record.versions[-1] if record.versions else None
+
+    def _preferred_success_version(self, record: TaskMemoryRecord) -> SequenceVersionRecord | None:
+        success_versions = [
+            version
+            for version in record.versions
+            if any(run.status == "success" for run in version.run_records)
+        ]
+        if not success_versions:
+            return None
+        return min(success_versions, key=self._version_quality_key)
 
     def _find_version_by_id(self, record: TaskMemoryRecord, version_id: str | None) -> SequenceVersionRecord | None:
         if not version_id:
@@ -341,8 +353,9 @@ class MemoryStore:
 
     def _build_task_card(self, record: TaskMemoryRecord) -> dict[str, Any]:
         latest_success_version = self._find_version_by_id(record, record.latest_success_version_id)
+        preferred_success_version = self._preferred_success_version(record)
         baseline_version = self._preferred_baseline_version(record)
-        version_for_failures = latest_success_version or baseline_version
+        version_for_failures = preferred_success_version or latest_success_version or baseline_version
         recent_failures: list[dict[str, Any]] = []
         if version_for_failures:
             failures = [run for run in version_for_failures.run_records if run.status != "success"]
@@ -360,6 +373,16 @@ class MemoryStore:
             "user_query": record.user_query,
             "task_description": record.task_description,
             "updated_at": record.updated_at,
+            "preferred_success_version": (
+                {
+                    "version_id": preferred_success_version.version_id,
+                    "change_summary": preferred_success_version.change_summary,
+                    "change_reason": preferred_success_version.change_reason,
+                    "sequence": [step.to_dict() for step in preferred_success_version.sequence],
+                }
+                if preferred_success_version
+                else None
+            ),
             "latest_success_version": (
                 {
                     "version_id": latest_success_version.version_id,
@@ -387,6 +410,7 @@ class MemoryStore:
         }
 
     def _build_task_record_view(self, record: TaskMemoryRecord) -> dict[str, Any]:
+        preferred_success_version = self._preferred_success_version(record)
         return {
             "record_id": record.record_id,
             "user_query": record.user_query,
@@ -394,10 +418,40 @@ class MemoryStore:
             "root_version_id": record.root_version_id,
             "latest_version_id": record.latest_version_id,
             "latest_success_version_id": record.latest_success_version_id,
+            "preferred_success_version_id": preferred_success_version.version_id if preferred_success_version else None,
             "created_at": record.created_at,
             "updated_at": record.updated_at,
             "versions": [version.to_dict() for version in record.versions],
         }
+
+    def _version_quality_key(self, version: SequenceVersionRecord) -> tuple[float, float, int, int, int, str]:
+        sequence_names = [step.action_name for step in version.sequence]
+        total_wait_seconds = round(
+            sum(step.duration for step in version.sequence if step.action_name.startswith("wait:")),
+            3,
+        )
+        duplicate_navigation_penalty = max(0, self._count_subsequence_matches(sequence_names, URL_NAVIGATION_PATTERN) - 1)
+        fallback_penalty = sum(1 for name in sequence_names if name in FALLBACK_ACTIONS)
+        double_click_penalty = sum(1 for name in sequence_names if name == "double_click:left:resized_image")
+        failure_run_count = sum(1 for run in version.run_records if run.status != "success")
+        return (
+            duplicate_navigation_penalty,
+            total_wait_seconds,
+            fallback_penalty + double_click_penalty,
+            len(sequence_names),
+            failure_run_count,
+            version.created_at or "",
+        )
+
+    def _count_subsequence_matches(self, sequence_names: list[str], pattern: tuple[str, ...]) -> int:
+        if not pattern or len(sequence_names) < len(pattern):
+            return 0
+        matches = 0
+        width = len(pattern)
+        for index in range(len(sequence_names) - width + 1):
+            if tuple(sequence_names[index : index + width]) == pattern:
+                matches += 1
+        return matches
 
     def _append_run_to_version(
         self,
