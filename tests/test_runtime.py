@@ -1,3 +1,4 @@
+import pytest
 from PIL import Image
 
 from lbh.memory import MemoryStore
@@ -244,5 +245,13 @@ def test_runtime_memory_search_returns_task_records(tmp_path):
     runtime.create_task("Open Chrome and go to ChatGPT.", task_id="task-1")
     result = runtime.memory_search("task-1")
 
-    assert result["memory"]["task_records"]
-    assert "ChatGPT" in result["memory"]["task_records"][0]["task_description"]
+    assert result["memory"]["task_cards"]
+    assert "ChatGPT" in result["memory"]["task_cards"][0]["task_description"]
+
+
+def test_runtime_memory_commit_requires_core_fields(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.create_task("Open ChatGPT.", task_id="task-1")
+
+    with pytest.raises(Exception):
+        runtime.memory_commit("task-1", {"run_status": "success", "run_note": "ok"})

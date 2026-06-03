@@ -100,7 +100,7 @@ def test_commit_changed_sequence_appends_new_version(tmp_path):
 
 def test_search_returns_matching_task_records(tmp_path):
     store = MemoryStore(memory_dir=tmp_path / "memories")
-    store.commit_task_record(
+    first = store.commit_task_record(
         user_query="Open Chrome and go to ChatGPT.",
         task_description="Open Chrome, navigate to ChatGPT, and ask a question.",
         sequence=[{"action_name": "open_chrome", "status": "success", "duration": 1}],
@@ -108,16 +108,50 @@ def test_search_returns_matching_task_records(tmp_path):
         run_note="Initial run.",
         elapsed_time=100.0,
     )
-    store.commit_task_record(
+    second = store.commit_task_record(
         user_query="Open Notepad and type a sentence.",
-        task_description="Open Notepad and enter text.",
+        task_description="Open another app and enter text.",
         sequence=[{"action_name": "open_notepad", "status": "success", "duration": 1}],
         run_status="success",
         run_note="Initial run.",
         elapsed_time=80.0,
     )
 
-    result = store.search(goal="Open Chrome, navigate to ChatGPT, and ask a question.")
+    result = store.search(goal="Open app")
 
-    assert result["task_records"]
-    assert "ChatGPT" in result["task_records"][0]["task_description"]
+    assert result["task_cards"]
+    assert result["task_cards"][0]["record_id"] == second["record"]["record_id"]
+    assert result["task_cards"][1]["record_id"] == first["record"]["record_id"]
+
+
+def test_task_card_includes_latest_success_version_and_recent_failures(tmp_path):
+    store = MemoryStore(memory_dir=tmp_path / "memories")
+    created = store.commit_task_record(
+        user_query="Open Chrome and go to ChatGPT.",
+        task_description="Open Chrome, navigate to ChatGPT, and ask a question.",
+        sequence=[{"action_name": "open_chrome", "status": "success", "duration": 1}],
+        run_status="success",
+        run_note="Initial run.",
+        elapsed_time=100.0,
+        change_summary="Initial sequence.",
+        change_reason="First run.",
+    )
+
+    for index in range(4):
+        store.commit_task_record(
+            record_id=created["record"]["record_id"],
+            user_query="Open Chrome and go to ChatGPT.",
+            task_description="Open Chrome, navigate to ChatGPT, and ask a question.",
+            sequence=[{"action_name": "open_chrome", "status": "success", "duration": 1}],
+            run_status="failure",
+            run_note=f"Failure {index}",
+            elapsed_time=100.0 + index,
+        )
+
+    result = store.search(goal="Open Chrome")
+
+    card = result["task_cards"][0]
+    assert card["latest_success_version"] is not None
+    assert card["latest_success_version"]["sequence"][0]["action_name"] == "open_chrome"
+    assert len(card["recent_failures"]) == 3
+    assert card["recent_failures"][0]["note"] == "Failure 3"

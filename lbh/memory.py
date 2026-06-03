@@ -7,6 +7,8 @@ import uuid
 from .common import MEMORY_DIR, append_jsonl, ensure_dir, now_iso, tokenise
 from .contracts import RunRecord, SequenceStepRecord, SequenceVersionRecord, TaskMemoryRecord
 
+RECENT_FAILURE_LIMIT = 3
+
 
 def jaccard_similarity(left: Iterable[str], right: Iterable[str]) -> float:
     left_set = set(left)
@@ -67,7 +69,7 @@ class MemoryStore:
         ranked = self._rank_task_records(query_tokens, limit)
         return {
             "query_signature": signature,
-            "task_records": ranked,
+            "task_cards": [self._build_task_card(record) for record in ranked],
         }
 
     def evaluate_failure_guards(
@@ -222,21 +224,22 @@ class MemoryStore:
             )
         return steps
 
-    def _rank_task_records(self, query_tokens: list[str], limit: int) -> list[dict[str, Any]]:
-        ranked: list[dict[str, Any]] = []
+    def _rank_task_records(self, query_tokens: list[str], limit: int) -> list[TaskMemoryRecord]:
+        ranked: list[tuple[float, TaskMemoryRecord]] = []
         for record in self.list_task_records():
             haystack = " ".join([record.user_query, record.task_description])
             score = jaccard_similarity(query_tokens, tokenise(haystack))
             if score <= 0:
                 continue
-            ranked.append(
-                {
-                    "score": round(score, 3),
-                    **record.to_dict(),
-                }
-            )
-        ranked.sort(key=lambda item: item["score"], reverse=True)
-        return ranked[:limit]
+            ranked.append((score, record))
+        ranked.sort(
+            key=lambda item: (
+                item[1].updated_at or "",
+                round(item[0], 3),
+            ),
+            reverse=True,
+        )
+        return [record for _, record in ranked[:limit]]
 
     def _rewrite_task_records(self, records: Iterable[TaskMemoryRecord]) -> None:
         self._rewrite_jsonl(self.task_records_path, [record.to_dict() for record in records])
@@ -281,3 +284,39 @@ class MemoryStore:
     def _new_record_id(self, user_query: str, task_description: str) -> str:
         seed = f"{user_query}|{task_description}|{uuid.uuid4().hex}"
         return f"taskmem-{sha1(seed.encode('utf-8')).hexdigest()[:12]}"
+
+    def _build_task_card(self, record: TaskMemoryRecord) -> dict[str, Any]:
+        latest_success_version = self._find_version_by_id(record, record.latest_success_version_id)
+        version_for_failures = latest_success_version or self._preferred_baseline_version(record)
+        recent_failures: list[dict[str, Any]] = []
+        if version_for_failures:
+            failures = [run for run in version_for_failures.run_records if run.status != "success"]
+            recent_failures = [
+                {
+                    "status": run.status,
+                    "elapsed_time": run.elapsed_time,
+                    "note": run.note,
+                    "created_at": run.created_at,
+                }
+                for run in list(reversed(failures))[:RECENT_FAILURE_LIMIT]
+            ]
+        return {
+            "record_id": record.record_id,
+            "user_query": record.user_query,
+            "task_description": record.task_description,
+            "updated_at": record.updated_at,
+            "latest_success_version": (
+                {
+                    "version_id": latest_success_version.version_id,
+                    "change_summary": latest_success_version.change_summary,
+                    "change_reason": latest_success_version.change_reason,
+                    "sequence": [step.to_dict() for step in latest_success_version.sequence],
+                }
+                if latest_success_version
+                else None
+            ),
+            "recent_failures": recent_failures,
+            "root_version_id": record.root_version_id,
+            "latest_version_id": record.latest_version_id,
+            "latest_success_version_id": record.latest_success_version_id,
+        }

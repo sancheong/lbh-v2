@@ -438,6 +438,14 @@ class LBHRuntime:
     def memory_commit(self, task: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
         state = self.task_store.load_state(task)
         events = self.task_store.read_events(task)
+        if not str(payload.get("task_description") or "").strip():
+            raise TaskStateError("memory-commit requires 'task_description'.")
+        if not str(payload.get("run_status") or "").strip():
+            raise TaskStateError("memory-commit requires 'run_status'.")
+        if payload.get("run_status") not in {"success", "failure"}:
+            raise TaskStateError("memory-commit 'run_status' must be 'success' or 'failure'.")
+        if "run_note" not in payload:
+            raise TaskStateError("memory-commit requires 'run_note'.")
         sequence = payload.get("sequence") or self.memory_store.derive_sequence_from_events(events)
         commit_result = self.memory_store.commit_task_record(
             user_query=str(payload.get("user_query") or state.goal),
