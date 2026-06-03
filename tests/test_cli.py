@@ -30,6 +30,18 @@ def test_cli_parser_accepts_memory_commit():
     assert args.memory_json == "{\"run_status\":\"success\"}"
 
 
+def test_cli_parser_accepts_stdin_json_for_action_batch_and_memory_commit():
+    parser = build_parser()
+
+    action_args = parser.parse_args(["action", "--task", "task-1", "--stdin-json"])
+    batch_args = parser.parse_args(["batch", "--task", "task-1", "--stdin-json"])
+    memory_args = parser.parse_args(["memory-commit", "--task", "task-1", "--stdin-json"])
+
+    assert action_args.stdin_json is True
+    assert batch_args.stdin_json is True
+    assert memory_args.stdin_json is True
+
+
 def test_cli_parser_accepts_memory_record_and_select():
     parser = build_parser()
 

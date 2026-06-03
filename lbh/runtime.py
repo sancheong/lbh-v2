@@ -521,6 +521,12 @@ class LBHRuntime:
                 )
         else:
             sequence = provided_sequence or derived_sequence
+        quality_notes.extend(
+            self._memory_commit_quality_notes(
+                run_status=str(payload.get("run_status") or "success"),
+                events=events,
+            )
+        )
         commit_result = self.memory_store.commit_task_record(
             user_query=str(payload.get("user_query") or state.goal),
             task_description=str(payload.get("task_description") or state.goal),
@@ -570,6 +576,39 @@ class LBHRuntime:
             "lifecycle_warnings": lifecycle_warnings,
             "quality_notes": quality_notes,
         }
+
+    def _memory_commit_quality_notes(
+        self,
+        *,
+        run_status: str,
+        events: list[dict[str, Any]],
+    ) -> list[str]:
+        notes: list[str] = []
+        if run_status == "success" and self._events_used_type_text_for_prompt(events):
+            notes.append(
+                "This successful run entered the prompt with type_text. Prefer clipboard_set + ctrl+v for prompt text to reduce IME/input corruption risk."
+            )
+        return notes
+
+    def _events_used_type_text_for_prompt(self, events: list[dict[str, Any]]) -> bool:
+        for event in events:
+            if event.get("type") != "action":
+                continue
+            action = event.get("action") or {}
+            if action.get("type") != "type_text":
+                continue
+            text = str(action.get("text") or "")
+            reason = str(action.get("reason") or "").lower()
+            if looks_like_url(text):
+                continue
+            if (
+                "prompt" in reason
+                or "message" in reason
+                or "question" in reason
+                or len(text.strip()) >= 15
+            ):
+                return True
+        return False
 
     def wait_stable(
         self,

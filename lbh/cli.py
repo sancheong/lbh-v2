@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
 from .common import coerce_json_input
@@ -50,7 +51,7 @@ def cmd_observe(runtime: LBHRuntime, args) -> dict[str, Any]:
 
 
 def cmd_action(runtime: LBHRuntime, args) -> dict[str, Any]:
-    payload = coerce_json_input(args.json or args.action_json or args.action_file)
+    payload = _coerce_cli_json(args.json or args.action_json or args.action_file, use_stdin=args.stdin_json)
     return runtime.execute_action(
         args.task,
         payload,
@@ -60,7 +61,7 @@ def cmd_action(runtime: LBHRuntime, args) -> dict[str, Any]:
 
 
 def cmd_batch(runtime: LBHRuntime, args) -> dict[str, Any]:
-    payload = coerce_json_input(args.json or args.actions)
+    payload = _coerce_cli_json(args.json or args.actions, use_stdin=args.stdin_json)
     if not args.observe_after:
         if isinstance(payload, list):
             payload = {"actions": payload, "observe_after": False}
@@ -104,8 +105,16 @@ def cmd_memory_select(runtime: LBHRuntime, args) -> dict[str, Any]:
 
 
 def cmd_memory_commit(runtime: LBHRuntime, args) -> dict[str, Any]:
-    payload = coerce_json_input(args.json or args.memory_json or args.memory_file)
+    payload = _coerce_cli_json(args.json or args.memory_json or args.memory_file, use_stdin=args.stdin_json)
     return runtime.memory_commit(args.task, payload)
+
+
+def _coerce_cli_json(value: str | None, *, use_stdin: bool = False) -> Any:
+    if use_stdin:
+        return json.loads(sys.stdin.read())
+    if value is None:
+        raise ValueError("A JSON payload or --stdin-json is required.")
+    return coerce_json_input(value)
 
 
 def cmd_wait_stable(runtime: LBHRuntime, args) -> dict[str, Any]:
@@ -189,6 +198,7 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--json")
     group.add_argument("--action-json")
     group.add_argument("--action-file")
+    group.add_argument("--stdin-json", action="store_true")
     _bool_override(action, "observe-after", True)
     action.add_argument("--ignore-guards", action="store_true")
     action.add_argument("--ignore-memory-guards", dest="ignore_guards", action="store_true")
@@ -200,6 +210,7 @@ def build_parser() -> argparse.ArgumentParser:
     group = batch.add_mutually_exclusive_group(required=True)
     group.add_argument("--json")
     group.add_argument("--actions")
+    group.add_argument("--stdin-json", action="store_true")
     _bool_override(batch, "observe-after", True)
     batch.add_argument("--ignore-guards", action="store_true")
     batch.add_argument("--ignore-memory-guards", dest="ignore_guards", action="store_true")
@@ -259,6 +270,7 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--json")
     group.add_argument("--memory-json")
     group.add_argument("--memory-file")
+    group.add_argument("--stdin-json", action="store_true")
     memory_commit.set_defaults(func=cmd_memory_commit)
 
     wait_stable = sub.add_parser("wait-stable")

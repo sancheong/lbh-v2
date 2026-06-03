@@ -51,6 +51,7 @@ Each run record contains:
 7. Commit the result with `memory-commit`, passing `base_version_id` when a specific success version was used as the draft.
 
 When providing timing fields to `memory-commit`, record them in seconds rather than milliseconds.
+For one-off commands, prefer inline `--json` / `--memory-json` payloads or `--stdin-json` over scratch temporary JSON files.
 
 ## Sequence evolution
 
@@ -62,6 +63,7 @@ When providing timing fields to `memory-commit`, record them in seconds rather t
 - The direct parent for a new version is the chosen draft version when `base_version_id` is supplied; otherwise it falls back to the latest successful version.
 - The root version is preserved even if it was a failure.
 - `memory-search` does not pick a single global best draft. It exposes success-version candidates and leaves the final choice to Codex.
+- A successful version that used `type_text` to enter prompt text should be treated as lower-quality than a clipboard-paste based prompt path, because IME/input corruption risk is higher.
 
 ## Semantic failures
 

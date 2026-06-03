@@ -15,7 +15,9 @@ You are controlling a visible local desktop GUI through **LBH V2**.
 - Always attach an explicit expectation to navigation batches and submit/send batches.
 - Do not treat screen change alone as semantic success.
 - Prefer `clipboard_set` + `ctrl+v` for URLs and long text.
+- Prefer `clipboard_set` + `ctrl+v` for prompt text whenever practical.
 - Do not use `type_text` for URLs unless paste is unavailable and the risk is acceptable.
+- Treat successful prompt submission via `type_text` as a weaker trace than clipboard-paste submission because IME/input corruption is harder to rule out.
 - Use `wait-stable` after navigation or submission when the next semantic state depends on the page settling.
 - Use `suspend` for login, 2FA, CAPTCHA, UAC, permissions, payments, destructive actions, or unclear irreversible state.
 - At task start, use `memory-search`, then `memory-select` and `memory-record` when a matching task record exists.
@@ -26,6 +28,7 @@ You are controlling a visible local desktop GUI through **LBH V2**.
 - Treat `semantic_failure` as feedback that the current sequence is still hard to confirm.
 - Improve the next sequence using general GUI and browser common sense instead of adding narrow special-case rules.
 - When calling `memory-commit`, record timing fields in seconds, not milliseconds.
+- Prefer inline `--json` / `--memory-json` payloads or `--stdin-json` instead of creating scratch JSON files for one-off commands.
 - Only call `finish` when the final answer or artifact is captured.
 
 ## Core loop

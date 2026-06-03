@@ -307,6 +307,36 @@ def test_runtime_memory_commit_keeps_refined_sequence_for_later_versions(tmp_pat
     assert result["quality_notes"] == []
 
 
+def test_runtime_memory_commit_warns_when_successful_prompt_used_type_text(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.create_task("Open ChatGPT.", task_id="task-1")
+    runtime.observe("task-1")
+    runtime.execute_batch(
+        "task-1",
+        {
+            "observe_after": False,
+            "actions": [
+                {"type": "click", "point": {"x": 10, "y": 10, "space": "resized_image"}, "reason": "Focus the prompt box."},
+                {"type": "type_text", "text": "Reply with exactly OK.", "reason": "Send the exact prompt."},
+                {"type": "press", "key": "enter", "reason": "Submit the message."},
+            ],
+        },
+    )
+
+    result = runtime.memory_commit(
+        "task-1",
+        {
+            "task_description": "Open Chrome and navigate to ChatGPT.",
+            "change_summary": "Initial raw capture.",
+            "change_reason": "First run.",
+            "run_note": "Recorded the first raw sequence.",
+            "run_status": "success",
+        },
+    )
+
+    assert any("type_text" in note for note in result["quality_notes"])
+
+
 def test_runtime_memory_search_returns_task_records(tmp_path):
     runtime = _runtime(tmp_path)
     runtime.memory_store.commit_task_record(
