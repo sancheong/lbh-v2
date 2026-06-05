@@ -17,9 +17,11 @@ This repository provides:
 - dynamic action batches
 - semantic expectations for actions and batches
 - task lifecycle commands
-- actionable memory guards and skill candidates
+- passive task-record memory
 - wait-stable and benchmark utilities
 - benchmark reporting for latency breakdowns
+
+Supported low-level GUI primitives are `click`, `double_click`, `move_to`, `mouse_down`, `mouse_up`, `drag`, `scroll`, `type_text`, `press`, `hotkey`, `wait`, `clipboard_set`, `clipboard_get`, and window actions.
 
 ## Quick start
 
@@ -27,8 +29,8 @@ This repository provides:
 pip install -r requirements.txt
 python -m lbh.cli start "Open Chrome, go to ChatGPT, ask a short question, capture the answer."
 python -m lbh.cli observe --task <task-id>
-python -m lbh.cli action --task <task-id> --action-file examples\click_resized_point.json
-python -m lbh.cli batch --task <task-id> --actions examples\navigate_chatgpt_batch.json
+python -m lbh.cli action --task <task-id> --json '{"type":"click","point":{"x":640,"y":520,"space":"resized_image"},"reason":"Click the visible target."}'
+python -m lbh.cli batch --task <task-id> --stdin-json
 python -m lbh.cli wait-stable --task <task-id> --seconds 3 --timeout 60
 python -m lbh.cli benchmark-report --task <task-id>
 ```
@@ -53,6 +55,9 @@ python -m lbh.cli benchmark-report --task <task-id>
 - `resume`
 - `status`
 - `memory-search`
+- `memory-select`
+- `memory-record`
+- `memory-commit`
 - `wait-stable`
 - `benchmark`
 - `benchmark-report`

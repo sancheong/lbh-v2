@@ -9,6 +9,8 @@ LBH V2 is designed to be faster than V1 by reducing unnecessary screenshot, LLM,
 - Dynamic batches reduce full observe/evaluate cycles between deterministic primitives.
 - `wait-stable` avoids asking the model whether a page has stopped moving.
 - Passive task-record memory reduces repeated rediscovery when a stable successful version already exists.
+- Optimized `draft_sequence` records reduce profile chooser, duplicate navigation, and per-click observation checkpoints.
+- Low-level `scroll` and `drag` primitives avoid substituting high-level browser automation when a GUI movement is deterministic.
 
 ## Benchmark command
 
@@ -48,3 +50,4 @@ python -m lbh.cli benchmark-report --task <task-id>
 - Treat semantic failures in the report as sequence-improvement signals, not as proof that the entire task failed.
 - Use `wait-stable` instead of repeated visual checks when waiting for navigation or response completion.
 - Prefer clipboard paste for URLs and long prompts to avoid IME-related recovery loops.
+- Compare `planning_summary.draft_action_count` and `planning_summary.observation_checkpoints` before and after memory consolidation.

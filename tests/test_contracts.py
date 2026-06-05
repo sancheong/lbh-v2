@@ -21,6 +21,35 @@ def test_action_spec_rejects_xy_without_coordinate_space():
         ActionSpec.from_dict({"type": "click", "x": 1, "y": 2, "reason": "bad"})
 
 
+def test_action_spec_parses_low_level_mouse_actions():
+    move = ActionSpec.from_dict(
+        {
+            "type": "move_to",
+            "point": {"x": 10, "y": 20, "space": "resized_image"},
+            "reason": "Move the cursor.",
+        }
+    )
+    drag = ActionSpec.from_dict(
+        {
+            "type": "drag",
+            "point": {"x": 40, "y": 50, "space": "resized_image"},
+            "button": "left",
+            "seconds": 0.2,
+            "reason": "Drag to target.",
+        }
+    )
+    scroll = ActionSpec.from_dict({"type": "scroll", "amount": -4, "reason": "Scroll down."})
+
+    assert move.fingerprint() == "move_to:resized_image"
+    assert drag.fingerprint() == "drag:left:resized_image"
+    assert scroll.fingerprint() == "scroll:down"
+
+
+def test_action_spec_rejects_scroll_without_amount():
+    with pytest.raises(ValidationError):
+        ActionSpec.from_dict({"type": "scroll", "reason": "bad"})
+
+
 def test_action_batch_parses():
     batch = ActionBatch.from_payload(
         {

@@ -49,6 +49,16 @@ That does not automatically mean the whole task failed. In LBH V2, mid-task sema
 
 These actions can succeed without any visible screen change. Do not require visual change for them unless you have an explicit reason.
 
+## Low-level mouse actions
+
+- `move_to`
+- `mouse_down`
+- `mouse_up`
+- `drag`
+- `scroll`
+
+These are still visible-desktop GUI primitives. Treat `scroll` and `drag` as visual actions and attach an expectation when their final state matters.
+
 ## Submit example
 
 ```json
@@ -76,4 +86,5 @@ These actions can succeed without any visible screen change. Do not require visu
 - Prefer GUI and browser common sense when reducing semantic failures:
   - paste for URLs and long text
   - explicit clicks over fragile focus traversal
+  - scroll or drag primitives over high-level page automation
   - browser-provided copy controls over generic select-all copying

@@ -39,6 +39,26 @@ class FakeAdapter:
         self.actions.append(("click", x, y, clicks, button))
         return {"status": "success", "desktop_x": x, "desktop_y": y, "clicks": clicks}
 
+    def move_to(self, x, y):
+        self.actions.append(("move_to", x, y))
+        return {"status": "success", "desktop_x": x, "desktop_y": y}
+
+    def mouse_down(self, *, x=None, y=None, button="left"):
+        self.actions.append(("mouse_down", x, y, button))
+        return {"status": "success", "desktop_x": x, "desktop_y": y, "button": button}
+
+    def mouse_up(self, *, x=None, y=None, button="left"):
+        self.actions.append(("mouse_up", x, y, button))
+        return {"status": "success", "desktop_x": x, "desktop_y": y, "button": button}
+
+    def drag_to(self, x, y, *, duration, button):
+        self.actions.append(("drag", x, y, duration, button))
+        return {"status": "success", "desktop_x": x, "desktop_y": y, "duration": duration, "button": button}
+
+    def scroll(self, amount):
+        self.actions.append(("scroll", amount))
+        return {"status": "success", "amount": amount}
+
     def type_text(self, text, *, interval):
         self.actions.append(("type_text", text))
         return {"status": "success", "text": text}
@@ -88,6 +108,38 @@ def test_runtime_click_converts_resized_coordinates(tmp_path):
     )
     assert result["result"]["desktop_point"]["x"] == 960
     assert result["result"]["desktop_point"]["y"] == 540
+
+
+def test_runtime_low_level_mouse_primitives(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.create_task("Drag a slider.", task_id="task-1")
+    runtime.observe("task-1")
+
+    move_result = runtime.execute_action(
+        "task-1",
+        {"type": "move_to", "point": {"x": 320, "y": 180, "space": "resized_image"}, "reason": "Move to slider handle."},
+        observe_after=False,
+    )
+    drag_result = runtime.execute_action(
+        "task-1",
+        {
+            "type": "drag",
+            "point": {"x": 640, "y": 180, "space": "resized_image"},
+            "button": "left",
+            "seconds": 0.1,
+            "reason": "Drag the slider handle.",
+        },
+        observe_after=False,
+    )
+    scroll_result = runtime.execute_action(
+        "task-1",
+        {"type": "scroll", "amount": -5, "reason": "Scroll down."},
+        observe_after=False,
+    )
+
+    assert move_result["result"]["desktop_point"]["x"] == 480
+    assert drag_result["result"]["desktop_point"]["x"] == 960
+    assert scroll_result["result"]["amount"] == -5
 
 
 def test_runtime_batch_executes_and_observes_once(tmp_path):
@@ -231,6 +283,41 @@ def test_runtime_memory_commit_derives_raw_sequence(tmp_path):
     record = result["memory_commit"]["record"]
     assert result["memory_commit"]["action"] == "create_record"
     assert record["versions"][0]["sequence"][0]["action_name"] == "hotkey:ctrl+l"
+
+
+def test_runtime_memory_commit_derives_executable_draft_sequence(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.create_task("Open ChatGPT.", task_id="task-1")
+    runtime.observe("task-1")
+    runtime.execute_batch(
+        "task-1",
+        {
+            "observe_after": True,
+            "expectation": {"title_contains_any": ["ChatGPT"]},
+            "actions": [
+                {"type": "hotkey", "keys": ["ctrl", "l"], "reason": "Focus address bar"},
+                {"type": "clipboard_set", "text": "https://chatgpt.com", "reason": "Prepare URL"},
+                {"type": "hotkey", "keys": ["ctrl", "v"], "reason": "Paste URL"},
+                {"type": "press", "key": "enter", "reason": "Navigate"},
+            ],
+        },
+    )
+
+    result = runtime.memory_commit(
+        "task-1",
+        {
+            "task_description": "Open Chrome and navigate to ChatGPT.",
+            "run_note": "Recorded executable draft sequence.",
+            "run_status": "success",
+        },
+    )
+
+    version = result["memory_commit"]["record"]["versions"][0]
+    draft = version["draft_sequence"]
+
+    assert draft[0]["type"] == "batch"
+    assert draft[0]["payload"]["actions"][1]["text"] == "https://chatgpt.com"
+    assert version["sequence"][0]["action_name"] == "hotkey:ctrl+l"
 
 
 def test_runtime_memory_commit_prefers_raw_sequence_for_root_version(tmp_path):

@@ -23,6 +23,21 @@ class DesktopAdapter:
     def click(self, x: int, y: int, *, clicks: int, button: str, interval: float) -> dict[str, Any]:
         raise NotImplementedError
 
+    def move_to(self, x: int, y: int) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def mouse_down(self, *, x: int | None = None, y: int | None = None, button: str = "left") -> dict[str, Any]:
+        raise NotImplementedError
+
+    def mouse_up(self, *, x: int | None = None, y: int | None = None, button: str = "left") -> dict[str, Any]:
+        raise NotImplementedError
+
+    def drag_to(self, x: int, y: int, *, duration: float, button: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def scroll(self, amount: int) -> dict[str, Any]:
+        raise NotImplementedError
+
     def type_text(self, text: str, *, interval: float) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -118,6 +133,26 @@ class PyAutoGUIDesktopAdapter(DesktopAdapter):
             "button": button,
             "interval": interval,
         }
+
+    def move_to(self, x: int, y: int) -> dict[str, Any]:
+        self._pyautogui().moveTo(x=x, y=y)
+        return {"status": "success", "desktop_x": x, "desktop_y": y}
+
+    def mouse_down(self, *, x: int | None = None, y: int | None = None, button: str = "left") -> dict[str, Any]:
+        self._pyautogui().mouseDown(x=x, y=y, button=button)
+        return {"status": "success", "desktop_x": x, "desktop_y": y, "button": button}
+
+    def mouse_up(self, *, x: int | None = None, y: int | None = None, button: str = "left") -> dict[str, Any]:
+        self._pyautogui().mouseUp(x=x, y=y, button=button)
+        return {"status": "success", "desktop_x": x, "desktop_y": y, "button": button}
+
+    def drag_to(self, x: int, y: int, *, duration: float, button: str) -> dict[str, Any]:
+        self._pyautogui().dragTo(x=x, y=y, duration=duration, button=button)
+        return {"status": "success", "desktop_x": x, "desktop_y": y, "duration": duration, "button": button}
+
+    def scroll(self, amount: int) -> dict[str, Any]:
+        self._pyautogui().scroll(amount)
+        return {"status": "success", "amount": amount}
 
     def type_text(self, text: str, *, interval: float) -> dict[str, Any]:
         self._pyautogui().write(text, interval=interval)

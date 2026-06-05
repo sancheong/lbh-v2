@@ -417,7 +417,7 @@ class LBHRuntime:
         state.suspension = None
         self.task_store.save_state(state)
         self.task_store.append_event(state.task_dir, "resume", "Resumed task after manual intervention.", status="success", note=note, previous_suspension=previous_suspension)
-        observation_result = self._record_observation(state, label="resume") if observe_after else None
+        observation_result = self._record_observation(state, expectation=None, label="resume") if observe_after else None
         state = self.task_store.load_state(task)
         return {
             "status": "success",
@@ -512,15 +512,19 @@ class LBHRuntime:
         existing_record = self.memory_store.get_task_record(target_record_id) if target_record_id else None
         derived_sequence = self.memory_store.derive_sequence_from_events(events)
         provided_sequence = payload.get("sequence")
+        derived_draft_sequence = self.memory_store.derive_draft_sequence_from_events(events)
+        provided_draft_sequence = payload.get("draft_sequence") or payload.get("codex_draft_sequence")
         quality_notes: list[str] = []
         if existing_record is None:
             sequence = derived_sequence or provided_sequence or []
+            draft_sequence = provided_draft_sequence or derived_draft_sequence or None
             if provided_sequence and derived_sequence:
                 quality_notes.append(
                     "The root version was saved from the raw event-derived sequence instead of the provided refined sequence."
                 )
         else:
             sequence = provided_sequence or derived_sequence
+            draft_sequence = provided_draft_sequence or derived_draft_sequence or None
         quality_notes.extend(
             self._memory_commit_quality_notes(
                 run_status=str(payload.get("run_status") or "success"),
@@ -536,6 +540,11 @@ class LBHRuntime:
             elapsed_time=float(payload.get("elapsed_time") or self._events_wall_clock_seconds(events)),
             change_summary=str(payload.get("change_summary") or ""),
             change_reason=str(payload.get("change_reason") or ""),
+            draft_sequence=draft_sequence,
+            task_type=payload.get("task_type"),
+            parameter_schema=payload.get("parameter_schema"),
+            start_state_requirements=payload.get("start_state_requirements"),
+            optimization_summary=payload.get("optimization_summary"),
             record_id=target_record_id,
             base_version_id=str(base_version_id) if base_version_id else None,
         )
@@ -1086,7 +1095,7 @@ class LBHRuntime:
         if action.type in {"click", "double_click"}:
             if not action.point:
                 raise TaskStateError(f"{action.type} requires a point.")
-            desktop_point = transform.point_to_desktop(action.point) if transform and action.point.space != CoordinateSpace.DESKTOP else action.point
+            desktop_point = self._desktop_point_for_action(action, transform)
             clicks = 2 if action.type == "double_click" else 1
             result = self.adapter.click(
                 int(round(desktop_point.x)),
@@ -1098,6 +1107,38 @@ class LBHRuntime:
             result["input_point"] = action.point.to_dict()
             result["desktop_point"] = desktop_point.to_dict()
             return self._attach_active_window(result)
+        if action.type == "move_to":
+            desktop_point = self._desktop_point_for_action(action, transform)
+            result = self.adapter.move_to(int(round(desktop_point.x)), int(round(desktop_point.y)))
+            result["input_point"] = action.point.to_dict() if action.point else None
+            result["desktop_point"] = desktop_point.to_dict()
+            return self._attach_active_window(result)
+        if action.type in {"mouse_down", "mouse_up"}:
+            desktop_point = self._desktop_point_for_action(action, transform) if action.point else None
+            kwargs = {
+                "x": int(round(desktop_point.x)) if desktop_point else None,
+                "y": int(round(desktop_point.y)) if desktop_point else None,
+                "button": action.button,
+            }
+            result = self.adapter.mouse_down(**kwargs) if action.type == "mouse_down" else self.adapter.mouse_up(**kwargs)
+            if action.point:
+                result["input_point"] = action.point.to_dict()
+            if desktop_point:
+                result["desktop_point"] = desktop_point.to_dict()
+            return self._attach_active_window(result)
+        if action.type == "drag":
+            desktop_point = self._desktop_point_for_action(action, transform)
+            result = self.adapter.drag_to(
+                int(round(desktop_point.x)),
+                int(round(desktop_point.y)),
+                duration=action.seconds if action.seconds is not None else 0.2,
+                button=action.button,
+            )
+            result["input_point"] = action.point.to_dict() if action.point else None
+            result["desktop_point"] = desktop_point.to_dict()
+            return self._attach_active_window(result)
+        if action.type == "scroll":
+            return self._attach_active_window(self.adapter.scroll(int(action.amount or 0)))
         if action.type == "type_text":
             return self._attach_active_window(self.adapter.type_text(action.text or "", interval=action.interval or 0.0))
         if action.type == "press":
@@ -1120,6 +1161,13 @@ class LBHRuntime:
         if action.type in window_actions:
             return self.adapter.window_action(window_actions[action.type], title_contains=action.title_contains)
         raise TaskStateError(f"Unsupported action type: {action.type}")
+
+    def _desktop_point_for_action(self, action: ActionSpec, transform: CoordinateTransform | None):
+        if not action.point:
+            raise TaskStateError(f"{action.type} requires a point.")
+        if transform and action.point.space != CoordinateSpace.DESKTOP:
+            return transform.point_to_desktop(action.point)
+        return action.point
 
     def _attach_active_window(self, result: dict[str, Any]) -> dict[str, Any]:
         try:

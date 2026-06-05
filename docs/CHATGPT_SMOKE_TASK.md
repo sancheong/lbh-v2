@@ -20,6 +20,8 @@ python -m lbh.cli observe --task <task-id>
 
 ## Recommended flow
 
+At task start, run the required memory workflow. If the optimized ChatGPT smoke record matches the current start state, use its direct `Default` profile launch draft instead of rediscovering Chrome launch, profile selection, and address-bar navigation.
+
 Open Chrome:
 
 - Observe the desktop.
@@ -29,7 +31,7 @@ Open Chrome:
 Navigate to ChatGPT:
 
 ```powershell
-python -m lbh.cli batch --task <task-id> --actions examples\navigate_chatgpt_batch.json
+python -m lbh.cli batch --task <task-id> --stdin-json
 ```
 
 The navigation batch should include an explicit expectation so that a search-results detour is reported as `semantic_failure` instead of `success`.

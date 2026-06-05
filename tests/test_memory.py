@@ -122,6 +122,102 @@ def test_commit_changed_sequence_appends_new_version(tmp_path):
     assert record.versions[-1].parent_version_id == record.versions[0].version_id
 
 
+def test_commit_stores_codex_draft_sequence_separately_from_raw_sequence(tmp_path):
+    store = MemoryStore(memory_dir=tmp_path / "memories")
+
+    created = store.commit_task_record(
+        user_query="Open Chrome and go to ChatGPT.",
+        task_description="Open Chrome, navigate to ChatGPT, and ask a question.",
+        sequence=[
+            {"action_name": "hotkey:ctrl+l", "status": "success", "duration": 0.4},
+            {"action_name": "clipboard_set:url", "status": "success", "duration": 0.01},
+            {"action_name": "hotkey:ctrl+v", "status": "success", "duration": 0.1},
+            {"action_name": "press:enter", "status": "success", "duration": 0.1},
+        ],
+        draft_sequence=[
+            {
+                "type": "batch",
+                "status": "success",
+                "payload": {
+                    "observe_after": True,
+                    "actions": [
+                        {"type": "hotkey", "keys": ["ctrl", "l"], "reason": "Focus address bar."},
+                        {"type": "clipboard_set", "text": "https://chatgpt.com", "reason": "Prepare URL."},
+                        {"type": "hotkey", "keys": ["ctrl", "v"], "reason": "Paste URL."},
+                        {"type": "press", "key": "enter", "reason": "Navigate."},
+                    ],
+                },
+            }
+        ],
+        run_status="success",
+        run_note="Initial run.",
+        elapsed_time=100.0,
+    )
+
+    summary = store.search(goal="Open Chrome")["task_records"][0]["success_versions"][0]
+
+    assert created["record"]["versions"][0]["sequence"][0]["action_name"] == "hotkey:ctrl+l"
+    assert summary["draft_sequence"][0]["payload"]["actions"][1]["text"] == "https://chatgpt.com"
+    assert summary["planning_summary"]["draft_batch_count"] == 1
+    assert summary["planning_summary"]["draft_action_count"] == 4
+
+
+def test_commit_preserves_task_type_metadata(tmp_path):
+    store = MemoryStore(memory_dir=tmp_path / "memories")
+
+    created = store.commit_task_record(
+        user_query="Create a private GitHub repository named demo.",
+        task_description="Parameterized private GitHub repository creation.",
+        task_type="github_private_repo_create",
+        parameter_schema={"repo_name": {"type": "string", "required": True}},
+        start_state_requirements=["Desktop is visible.", "GitHub profile is signed in."],
+        optimization_summary={"removed_observation_checkpoints": 7},
+        sequence=[{"action_name": "hotkey:win+r", "status": "success", "duration": 0.3}],
+        draft_sequence=[{"type": "batch", "payload": {"actions": [{"type": "hotkey", "keys": ["win", "r"], "reason": "Open Run."}]}}],
+        run_status="success",
+        run_note="Initial optimized memory.",
+        elapsed_time=20.0,
+    )
+
+    record_id = created["record"]["record_id"]
+    summary = store.search(goal="Create GitHub repository demo")["task_records"][0]
+    view = store.get_task_record_view(record_id)
+
+    assert summary["task_type"] == "github_private_repo_create"
+    assert summary["parameter_schema"]["repo_name"]["required"] is True
+    assert view["start_state_requirements"][0] == "Desktop is visible."
+    assert view["optimization_summary"]["removed_observation_checkpoints"] == 7
+
+
+def test_commit_changed_draft_sequence_appends_new_success_version(tmp_path):
+    store = MemoryStore(memory_dir=tmp_path / "memories")
+    created = store.commit_task_record(
+        user_query="Open Chrome and go to ChatGPT.",
+        task_description="Open Chrome, navigate to ChatGPT, and ask a question.",
+        sequence=[{"action_name": "open_chrome", "status": "success", "duration": 1}],
+        draft_sequence=[{"type": "action", "payload": {"type": "window_activate", "reason": "Focus Chrome."}}],
+        run_status="success",
+        run_note="Initial run.",
+        elapsed_time=100.0,
+    )
+
+    updated = store.commit_task_record(
+        record_id=created["record"]["record_id"],
+        user_query="Open Chrome and go to ChatGPT.",
+        task_description="Open Chrome, navigate to ChatGPT, and ask a question.",
+        sequence=[{"action_name": "open_chrome", "status": "success", "duration": 1}],
+        draft_sequence=[{"type": "action", "payload": {"type": "window_activate", "reason": "Focus existing Chrome window."}}],
+        run_status="success",
+        run_note="Refined draft only.",
+        elapsed_time=95.0,
+        change_summary="Refined executable draft.",
+        change_reason="The raw fingerprint sequence stayed the same, but Codex should see the improved draft.",
+    )
+
+    assert updated["action"] == "append_version"
+    assert len(updated["record"]["versions"]) == 2
+
+
 def test_commit_failed_changed_sequence_appends_run_instead_of_version(tmp_path):
     store = MemoryStore(memory_dir=tmp_path / "memories")
     created = store.commit_task_record(
@@ -364,3 +460,46 @@ def test_derive_sequence_from_events_uses_seconds(tmp_path):
     )
 
     assert sequence[0]["duration"] == 1.25
+
+
+def test_derive_draft_sequence_from_events_preserves_batch_payload(tmp_path):
+    store = MemoryStore(memory_dir=tmp_path / "memories")
+
+    draft = store.derive_draft_sequence_from_events(
+        [
+            {
+                "type": "action",
+                "batch_id": "batch-1",
+                "action": {"type": "hotkey", "keys": ["ctrl", "l"], "fingerprint": "hotkey:ctrl+l"},
+                "primitive_status": "success",
+                "duration_ms": 100.0,
+            },
+            {
+                "type": "batch",
+                "batch_id": "batch-1",
+                "status": "success",
+                "duration_ms": 500.0,
+                "batch": {
+                    "observe_after": True,
+                    "expectation": {"title_contains_any": ["ChatGPT"]},
+                    "actions": [
+                        {"type": "hotkey", "keys": ["ctrl", "l"], "reason": "Focus address bar."},
+                        {"type": "clipboard_set", "text": "https://chatgpt.com", "reason": "Prepare URL."},
+                    ],
+                },
+            },
+            {
+                "type": "action",
+                "status": "success",
+                "primitive_status": "success",
+                "duration_ms": 50.0,
+                "action": {"type": "clipboard_get", "reason": "Verify response.", "fingerprint": "clipboard_get"},
+            },
+        ]
+    )
+
+    assert len(draft) == 2
+    assert draft[0]["type"] == "batch"
+    assert draft[0]["payload"]["actions"][1]["text"] == "https://chatgpt.com"
+    assert draft[1]["type"] == "action"
+    assert "fingerprint" not in draft[1]["payload"]

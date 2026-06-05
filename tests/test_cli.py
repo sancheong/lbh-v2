@@ -10,9 +10,9 @@ def test_cli_parser_accepts_task_new():
 
 def test_cli_parser_accepts_batch():
     parser = build_parser()
-    args = parser.parse_args(["batch", "--task", "task-1", "--actions", "batch.json"])
+    args = parser.parse_args(["batch", "--task", "task-1", "--json", "{\"actions\":[{\"type\":\"press\",\"key\":\"enter\",\"reason\":\"Continue.\"}]}"])
     assert args.task == "task-1"
-    assert args.actions == "batch.json"
+    assert args.json
 
 
 def test_cli_parser_accepts_benchmark_report_and_memory_mode():

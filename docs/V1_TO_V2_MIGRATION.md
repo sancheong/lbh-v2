@@ -9,8 +9,10 @@ V2 uses:
 ```powershell
 python -m lbh.cli start "goal text"
 python -m lbh.cli observe --task <task-id>
-python -m lbh.cli action --task <task-id> --action-file action.json
-python -m lbh.cli batch --task <task-id> --actions batch.json
+python -m lbh.cli action --task <task-id> --json "{...}"
+python -m lbh.cli action --task <task-id> --stdin-json
+python -m lbh.cli batch --task <task-id> --json "{...}"
+python -m lbh.cli batch --task <task-id> --stdin-json
 python -m lbh.cli finish --task <task-id> --answer "..."
 ```
 
@@ -19,8 +21,9 @@ python -m lbh.cli finish --task <task-id> --answer "..."
 - coordinate system is explicit
 - resized screenshots are the default contract
 - dynamic batches are first-class
-- memory is actionable, not just note storage
+- memory is passive task-record storage with executable low-level GUI drafts
 - task storage is cleaner
+- low-level mouse primitives include `move_to`, `mouse_down`, `mouse_up`, `drag`, and `scroll`
 
 ## How to avoid coordinate mistakes
 

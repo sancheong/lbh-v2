@@ -8,8 +8,8 @@ LBH V2 is a visible-desktop browser runtime for Codex.
 pip install -r requirements.txt
 python -m lbh.cli start "Open Chrome, go to ChatGPT, ask a short question, capture the answer."
 python -m lbh.cli observe --task <task-id>
-python -m lbh.cli action --task <task-id> --action-file examples\click_resized_point.json
-python -m lbh.cli batch --task <task-id> --actions examples\navigate_chatgpt_batch.json
+python -m lbh.cli action --task <task-id> --json '{"type":"click","point":{"x":640,"y":520,"space":"resized_image"},"reason":"Click the visible target."}'
+python -m lbh.cli batch --task <task-id> --stdin-json
 python -m lbh.cli suspend --task <task-id> --reason-code login_required --user-action "Complete the login flow manually, then resume."
 python -m lbh.cli resume --task <task-id> --note "The user completed login."
 python -m lbh.cli finish --task <task-id> --answer "Captured the visible result."
@@ -21,6 +21,7 @@ python -m lbh.cli finish --task <task-id> --answer "Captured the visible result.
 - The runtime does not replace Codex visual reasoning.
 - Locator memory is secondary to screenshot interpretation.
 - `wait-stable` is generic image-diff logic, not semantic page understanding.
+- Memory stores executable low-level drafts, not high-level browser automation.
 
 ## V1 parity checklist
 
@@ -47,3 +48,4 @@ python -m lbh.cli finish --task <task-id> --answer "Captured the visible result.
 - [x] Benchmark report command
 - [x] Batch semantic expectations
 - [x] Codex-facing prompt contract
+- [x] Low-level mouse primitives: `move_to`, `mouse_down`, `mouse_up`, `drag`, `scroll`

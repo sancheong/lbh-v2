@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from hashlib import sha1
+import json
 from typing import Any, Iterable, Mapping
 import uuid
 
@@ -116,11 +118,17 @@ class MemoryStore:
         elapsed_time: float,
         change_summary: str = "",
         change_reason: str = "",
+        draft_sequence: list[Mapping[str, Any]] | None = None,
+        task_type: str | None = None,
+        parameter_schema: Mapping[str, Any] | None = None,
+        start_state_requirements: list[str] | None = None,
+        optimization_summary: Mapping[str, Any] | None = None,
         record_id: str | None = None,
         base_version_id: str | None = None,
     ) -> dict[str, Any]:
         records = {record.record_id: record for record in self.list_task_records()}
         normalized_sequence = self._normalise_sequence(sequence)
+        normalized_draft_sequence = self._normalise_draft_sequence(draft_sequence)
         target_record = records.get(record_id) if record_id else None
         created_new_record = target_record is None
         if target_record is None:
@@ -129,6 +137,10 @@ class MemoryStore:
                 user_query=user_query,
                 task_description=task_description,
                 versions=[],
+                task_type=task_type,
+                parameter_schema=deepcopy(dict(parameter_schema)) if parameter_schema is not None else None,
+                start_state_requirements=list(start_state_requirements) if start_state_requirements is not None else None,
+                optimization_summary=deepcopy(dict(optimization_summary)) if optimization_summary is not None else None,
                 created_at=now_iso(),
                 updated_at=now_iso(),
             )
@@ -144,7 +156,11 @@ class MemoryStore:
 
         should_append_run = bool(baseline_version) and (
             run_status != "success"
-            or self._sequence_signature(baseline_version.sequence) == self._sequence_signature(normalized_sequence)
+            or (
+                self._sequence_signature(baseline_version.sequence) == self._sequence_signature(normalized_sequence)
+                and self._draft_sequence_signature(baseline_version.draft_sequence)
+                == self._draft_sequence_signature(normalized_draft_sequence)
+            )
         )
         if should_append_run:
             updated_record = self._append_run_to_version(target_record, baseline_version.version_id, run_record)
@@ -165,6 +181,7 @@ class MemoryStore:
             change_reason=change_reason,
             sequence=normalized_sequence,
             run_records=[run_record],
+            draft_sequence=normalized_draft_sequence,
             created_at=now_iso(),
             updated_at=now_iso(),
         )
@@ -174,6 +191,22 @@ class MemoryStore:
             user_query=user_query,
             task_description=task_description,
             versions=updated_versions,
+            task_type=task_type if task_type is not None else target_record.task_type,
+            parameter_schema=(
+                deepcopy(dict(parameter_schema))
+                if parameter_schema is not None
+                else deepcopy(target_record.parameter_schema)
+            ),
+            start_state_requirements=(
+                list(start_state_requirements)
+                if start_state_requirements is not None
+                else (list(target_record.start_state_requirements) if target_record.start_state_requirements is not None else None)
+            ),
+            optimization_summary=(
+                deepcopy(dict(optimization_summary))
+                if optimization_summary is not None
+                else deepcopy(target_record.optimization_summary)
+            ),
             root_version_id=target_record.root_version_id or new_version.version_id,
             latest_version_id=new_version.version_id,
             latest_success_version_id=(
@@ -210,10 +243,33 @@ class MemoryStore:
             )
         return steps
 
+    def derive_draft_sequence_from_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        draft: list[dict[str, Any]] = []
+        for event in events:
+            event_type = event.get("type")
+            if event_type == "batch":
+                draft.append(self._draft_batch_step(event))
+                continue
+            if event_type == "action":
+                if event.get("batch_id"):
+                    continue
+                draft.append(self._draft_action_step(event))
+                continue
+            if event_type == "wait_stable":
+                draft.append(self._draft_wait_stable_step(event))
+        return draft
+
     def _rank_task_records(self, query_tokens: list[str], limit: int) -> list[TaskMemoryRecord]:
         ranked: list[tuple[float, TaskMemoryRecord]] = []
         for record in self.list_task_records():
-            haystack = " ".join([record.user_query, record.task_description])
+            haystack = " ".join(
+                [
+                    record.user_query,
+                    record.task_description,
+                    record.task_type or "",
+                    " ".join((record.parameter_schema or {}).keys()),
+                ]
+            )
             score = jaccard_similarity(query_tokens, tokenise(haystack))
             if score <= 0:
                 continue
@@ -251,6 +307,16 @@ class MemoryStore:
             for step in normalised
         ]
 
+    def _normalise_draft_sequence(self, draft_sequence: list[Mapping[str, Any]] | None) -> list[dict[str, Any]] | None:
+        if draft_sequence is None:
+            return None
+        normalised: list[dict[str, Any]] = []
+        for item in draft_sequence:
+            if not isinstance(item, Mapping):
+                continue
+            normalised.append(deepcopy(dict(item)))
+        return normalised
+
     def _normalise_task_record_time_units(self, record: TaskMemoryRecord) -> TaskMemoryRecord:
         normalized_versions: list[SequenceVersionRecord] = []
         for version in record.versions:
@@ -283,6 +349,7 @@ class MemoryStore:
                         )
                         for run in version.run_records
                     ],
+                    draft_sequence=self._normalise_draft_sequence(version.draft_sequence),
                     created_at=version.created_at,
                     updated_at=version.updated_at,
                 )
@@ -292,6 +359,10 @@ class MemoryStore:
             user_query=record.user_query,
             task_description=record.task_description,
             versions=normalized_versions,
+            task_type=record.task_type,
+            parameter_schema=deepcopy(record.parameter_schema),
+            start_state_requirements=(list(record.start_state_requirements) if record.start_state_requirements is not None else None),
+            optimization_summary=deepcopy(record.optimization_summary),
             root_version_id=record.root_version_id,
             latest_version_id=record.latest_version_id,
             latest_success_version_id=record.latest_success_version_id,
@@ -313,6 +384,9 @@ class MemoryStore:
 
     def _sequence_signature(self, sequence: list[SequenceStepRecord]) -> tuple[str, ...]:
         return tuple(step.action_name for step in sequence)
+
+    def _draft_sequence_signature(self, draft_sequence: list[dict[str, Any]] | None) -> str:
+        return json.dumps(draft_sequence or [], sort_keys=True, separators=(",", ":"))
 
     def _resolve_commit_base_version(
         self,
@@ -354,6 +428,10 @@ class MemoryStore:
             "record_id": record.record_id,
             "user_query": record.user_query,
             "task_description": record.task_description,
+            "task_type": record.task_type,
+            "parameter_schema": deepcopy(record.parameter_schema) if record.parameter_schema is not None else None,
+            "start_state_requirements": list(record.start_state_requirements) if record.start_state_requirements is not None else None,
+            "optimization_summary": deepcopy(record.optimization_summary) if record.optimization_summary is not None else None,
             "updated_at": record.updated_at,
             "success_versions": [self._build_success_version_summary(version) for version in self._success_versions(record)],
             "recent_failures": self._recent_failures(record),
@@ -367,6 +445,10 @@ class MemoryStore:
             "record_id": record.record_id,
             "user_query": record.user_query,
             "task_description": record.task_description,
+            "task_type": record.task_type,
+            "parameter_schema": deepcopy(record.parameter_schema) if record.parameter_schema is not None else None,
+            "start_state_requirements": list(record.start_state_requirements) if record.start_state_requirements is not None else None,
+            "optimization_summary": deepcopy(record.optimization_summary) if record.optimization_summary is not None else None,
             "root_version_id": record.root_version_id,
             "latest_version_id": record.latest_version_id,
             "latest_success_version_id": record.latest_success_version_id,
@@ -389,6 +471,8 @@ class MemoryStore:
             "change_summary": version.change_summary,
             "change_reason": version.change_reason,
             "sequence": [step.to_dict() for step in version.sequence],
+            "draft_sequence": deepcopy(version.draft_sequence) if version.draft_sequence is not None else None,
+            "planning_summary": self._planning_summary(version, success_runs, failure_runs),
             "success_run_count": len(success_runs),
             "failure_run_count": len(failure_runs),
             "latest_success_run": latest_success_run.to_dict() if latest_success_run else None,
@@ -434,6 +518,7 @@ class MemoryStore:
                         change_reason=version.change_reason,
                         sequence=version.sequence,
                         run_records=[*version.run_records, run_record],
+                        draft_sequence=version.draft_sequence,
                         created_at=version.created_at,
                         updated_at=now_iso(),
                     )
@@ -445,9 +530,82 @@ class MemoryStore:
             user_query=record.user_query,
             task_description=record.task_description,
             versions=updated_versions,
+            task_type=record.task_type,
+            parameter_schema=deepcopy(record.parameter_schema),
+            start_state_requirements=(list(record.start_state_requirements) if record.start_state_requirements is not None else None),
+            optimization_summary=deepcopy(record.optimization_summary),
             root_version_id=record.root_version_id,
             latest_version_id=record.latest_version_id,
             latest_success_version_id=self._latest_success_version_id(updated_versions, record.latest_success_version_id),
             created_at=record.created_at,
             updated_at=now_iso(),
         )
+
+    def _draft_action_step(self, event: Mapping[str, Any]) -> dict[str, Any]:
+        action = self._compact_action_payload(event.get("action") or {})
+        return {
+            "type": "action",
+            "status": str(event.get("status") or event.get("primitive_status") or "unknown"),
+            "duration": round(float(event.get("duration_ms", 0.0)) / 1000.0, 3),
+            "payload": action,
+            "semantic_reason": ((event.get("semantic_evaluation") or {}).get("reason")),
+        }
+
+    def _draft_batch_step(self, event: Mapping[str, Any]) -> dict[str, Any]:
+        batch = deepcopy(dict(event.get("batch") or {}))
+        return {
+            "type": "batch",
+            "status": str(event.get("status") or "unknown"),
+            "duration": round(float(event.get("duration_ms", 0.0)) / 1000.0, 3),
+            "payload": batch,
+            "semantic_reason": ((event.get("semantic_evaluation") or {}).get("reason")),
+        }
+
+    def _draft_wait_stable_step(self, event: Mapping[str, Any]) -> dict[str, Any]:
+        wait_result = event.get("wait_result") or {}
+        return {
+            "type": "wait_stable",
+            "status": str(event.get("status") or "unknown"),
+            "duration": round(float(event.get("duration_ms", 0.0)) / 1000.0, 3),
+            "stable_seconds": wait_result.get("stable_duration"),
+            "elapsed_seconds": wait_result.get("elapsed_seconds"),
+            "diff_threshold": wait_result.get("diff_threshold"),
+        }
+
+    def _compact_action_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        action = deepcopy(dict(payload))
+        action.pop("fingerprint", None)
+        return action
+
+    def _planning_summary(
+        self,
+        version: SequenceVersionRecord,
+        success_runs: list[RunRecord],
+        failure_runs: list[RunRecord],
+    ) -> dict[str, Any]:
+        draft_sequence = version.draft_sequence or []
+        draft_action_count = 0
+        draft_batch_count = 0
+        observation_checkpoints = 0
+        for step in draft_sequence:
+            if step.get("type") == "batch":
+                draft_batch_count += 1
+                payload = step.get("payload") or {}
+                draft_action_count += len(payload.get("actions") or [])
+                if payload.get("observe_after", True):
+                    observation_checkpoints += 1
+            elif step.get("type") == "action":
+                draft_action_count += 1
+            elif step.get("type") == "wait_stable":
+                observation_checkpoints += 1
+        latest_success_run = success_runs[-1] if success_runs else None
+        return {
+            "raw_step_count": len(version.sequence),
+            "draft_step_count": len(draft_sequence),
+            "draft_batch_count": draft_batch_count,
+            "draft_action_count": draft_action_count,
+            "observation_checkpoints": observation_checkpoints,
+            "success_run_count": len(success_runs),
+            "failure_run_count": len(failure_runs),
+            "latest_success_elapsed_time": latest_success_run.elapsed_time if latest_success_run else None,
+        }

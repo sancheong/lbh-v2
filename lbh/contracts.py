@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -14,6 +15,11 @@ POINT_ACTIONS = {"click", "double_click"}
 ACTION_TYPES = {
     "click",
     "double_click",
+    "move_to",
+    "mouse_down",
+    "mouse_up",
+    "drag",
+    "scroll",
     "type_text",
     "press",
     "hotkey",
@@ -247,6 +253,7 @@ class ActionSpec:
     seconds: float | None = None
     button: str = "left"
     interval: float | None = None
+    amount: int | None = None
     expectation: Expectation | None = None
     timeout: float | None = None
     risk: str | None = None
@@ -281,6 +288,7 @@ class ActionSpec:
             seconds=float(payload["seconds"]) if payload.get("seconds") is not None else None,
             button=str(payload.get("button", "left")).lower(),
             interval=float(payload["interval"]) if payload.get("interval") is not None else None,
+            amount=_coerce_optional_int(payload.get("amount") or payload.get("scroll_amount") or payload.get("clicks")),
             expectation=Expectation.from_payload(payload.get("expectation")),
             timeout=float(payload["timeout"]) if payload.get("timeout") is not None else None,
             risk=payload.get("risk") or payload.get("safety"),
@@ -296,8 +304,12 @@ class ActionSpec:
     def validate(self) -> None:
         if self.type in POINT_ACTIONS and not self.point:
             raise ValidationError(f"{self.type} requires a point.")
-        if self.type in POINT_ACTIONS and self.button not in VALID_BUTTONS:
+        if self.type in {"move_to", "drag"} and not self.point:
+            raise ValidationError(f"{self.type} requires a point.")
+        if self.type in {"click", "double_click", "mouse_down", "mouse_up", "drag"} and self.button not in VALID_BUTTONS:
             raise ValidationError(f"Unsupported mouse button: {self.button}")
+        if self.type == "scroll" and self.amount is None:
+            raise ValidationError("scroll requires 'amount' or 'clicks'.")
         if self.type == "type_text" and self.text is None:
             raise ValidationError("type_text requires 'text'.")
         if self.type == "press" and not self.key:
@@ -323,6 +335,8 @@ class ActionSpec:
             return "window_action"
         if self.type == "wait":
             return "non_visual_action"
+        if self.type in {"move_to", "mouse_down", "mouse_up", "drag", "scroll"}:
+            return "visual_action"
         if self.type in {"press", "hotkey"}:
             if self.key == "enter":
                 return "navigation_action"
@@ -353,6 +367,16 @@ class ActionSpec:
     def fingerprint(self) -> str:
         if self.type in POINT_ACTIONS and self.point:
             return f"{self.type}:{self.button}:{self.point.space.value}"
+        if self.type == "move_to" and self.point:
+            return f"move_to:{self.point.space.value}"
+        if self.type in {"mouse_down", "mouse_up"}:
+            target = f":{self.point.space.value}" if self.point else ""
+            return f"{self.type}:{self.button}{target}"
+        if self.type == "drag" and self.point:
+            return f"drag:{self.button}:{self.point.space.value}"
+        if self.type == "scroll":
+            direction = "up" if int(self.amount or 0) > 0 else "down"
+            return f"scroll:{direction}"
         if self.type == "type_text":
             if looks_like_url(self.text):
                 return "type_text:url"
@@ -382,6 +406,7 @@ class ActionSpec:
             "reason": self.reason,
             "button": self.button if self.type in POINT_ACTIONS else None,
             "interval": self.interval,
+            "amount": self.amount,
             "timeout": self.timeout,
             "risk": self.risk,
             "text": self.text,
@@ -396,6 +421,8 @@ class ActionSpec:
             "action_category": self.action_category,
             "expectation": self.expectation.to_dict() if self.expectation else None,
         }
+        if self.type in {"mouse_down", "mouse_up", "drag"}:
+            payload["button"] = self.button
         if self.point:
             payload["point"] = self.point.to_dict()
             payload["coordinate_space"] = self.point.space.value
@@ -557,6 +584,7 @@ class SequenceVersionRecord:
     change_reason: str
     sequence: list[SequenceStepRecord]
     run_records: list[RunRecord]
+    draft_sequence: list[dict[str, Any]] | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -568,6 +596,7 @@ class SequenceVersionRecord:
             change_summary=str(payload.get("change_summary") or ""),
             change_reason=str(payload.get("change_reason") or ""),
             sequence=[SequenceStepRecord.from_dict(item) for item in payload.get("sequence", [])],
+            draft_sequence=_copy_draft_sequence(payload.get("draft_sequence")),
             run_records=[RunRecord.from_dict(item) for item in payload.get("run_records", [])],
             created_at=payload.get("created_at"),
             updated_at=payload.get("updated_at"),
@@ -580,6 +609,7 @@ class SequenceVersionRecord:
             "change_summary": self.change_summary,
             "change_reason": self.change_reason,
             "sequence": [item.to_dict() for item in self.sequence],
+            "draft_sequence": deepcopy(self.draft_sequence) if self.draft_sequence is not None else None,
             "run_records": [item.to_dict() for item in self.run_records],
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -592,6 +622,10 @@ class TaskMemoryRecord:
     user_query: str
     task_description: str
     versions: list[SequenceVersionRecord]
+    task_type: str | None = None
+    parameter_schema: dict[str, Any] | None = None
+    start_state_requirements: list[str] | None = None
+    optimization_summary: dict[str, Any] | None = None
     root_version_id: str | None = None
     latest_version_id: str | None = None
     latest_success_version_id: str | None = None
@@ -605,6 +639,10 @@ class TaskMemoryRecord:
             user_query=str(payload.get("user_query") or ""),
             task_description=str(payload.get("task_description") or ""),
             versions=[SequenceVersionRecord.from_dict(item) for item in payload.get("versions", [])],
+            task_type=str(payload.get("task_type") or "") or None,
+            parameter_schema=_copy_optional_mapping(payload.get("parameter_schema")),
+            start_state_requirements=_copy_optional_string_list(payload.get("start_state_requirements")),
+            optimization_summary=_copy_optional_mapping(payload.get("optimization_summary")),
             root_version_id=payload.get("root_version_id"),
             latest_version_id=payload.get("latest_version_id"),
             latest_success_version_id=payload.get("latest_success_version_id"),
@@ -617,6 +655,10 @@ class TaskMemoryRecord:
             "record_id": self.record_id,
             "user_query": self.user_query,
             "task_description": self.task_description,
+            "task_type": self.task_type,
+            "parameter_schema": deepcopy(self.parameter_schema) if self.parameter_schema is not None else None,
+            "start_state_requirements": list(self.start_state_requirements) if self.start_state_requirements is not None else None,
+            "optimization_summary": deepcopy(self.optimization_summary) if self.optimization_summary is not None else None,
             "versions": [item.to_dict() for item in self.versions],
             "root_version_id": self.root_version_id,
             "latest_version_id": self.latest_version_id,
@@ -711,6 +753,34 @@ def _extract_point(payload: Mapping[str, Any]) -> Point | None:
     return None
 
 
+def _copy_draft_sequence(payload: Any) -> list[dict[str, Any]] | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, list):
+        raise ValidationError("draft_sequence must be a list when provided.")
+    copied: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, Mapping):
+            raise ValidationError("draft_sequence items must be objects.")
+        copied.append(deepcopy(dict(item)))
+    return copied
+
+
+def _copy_optional_mapping(payload: Any) -> dict[str, Any] | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, Mapping):
+        raise ValidationError("Expected an object.")
+    return deepcopy(dict(payload))
+
+
+def _copy_optional_string_list(payload: Any) -> list[str] | None:
+    if payload is None:
+        return None
+    items = _coerce_string_list(payload)
+    return list(items) if items is not None else None
+
+
 def looks_like_url(text: str | None) -> bool:
     if not text:
         return False
@@ -728,6 +798,12 @@ def _coerce_string_list(value: Any) -> list[str] | None:
         items = [str(item).strip() for item in value if str(item).strip()]
         return items or None
     return [str(value).strip()]
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
 
 
 def _merge_expectation_payload(
